@@ -1,0 +1,1445 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ЕРПИ - Система управления заказами</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f5f5;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        .top-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 15px 20px;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .current-time {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #1e3c72;
+        }
+
+        .role-selector {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .role-selector label {
+            font-weight: bold;
+            color: #1e3c72;
+        }
+
+        .role-selector select {
+            padding: 8px 12px;
+            border: 2px solid #1e3c72;
+            border-radius: 6px;
+            font-size: 1rem;
+            background: white;
+            color: #1e3c72;
+            cursor: pointer;
+        }
+
+        .role-selector select:hover {
+            background: #f0f4ff;
+        }
+
+        .kitchen-info {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+
+        .courier-info {
+            background: #d1ecf1;
+            border-left: 4px solid #17a2b8;
+            padding: 8px;
+            margin: 5px 0;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+
+        .admin-info {
+            background: #f8d7da;
+            border-left: 4px solid #dc3545;
+            padding: 8px;
+            margin: 5px 0;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+
+        .role-selector {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .role-selector label {
+            font-weight: bold;
+            color: #1e3c72;
+        }
+
+        .role-selector select {
+            padding: 8px 12px;
+            border: 2px solid #1e3c72;
+            border-radius: 6px;
+            font-size: 1rem;
+            background: white;
+            color: #1e3c72;
+            cursor: pointer;
+        }
+
+        .role-selector select:hover {
+            background: #f0f4ff;
+        }
+
+        .pagination-wrapper {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 5px;
+        }
+
+        .orders-container {
+            position: relative;
+            height: calc(100vh - 200px);
+            overflow: hidden;
+            padding-top: 5px;
+        }
+
+        .orders-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            align-content: start;
+            padding-top: 5px;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        .pagination-controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            padding: 3px 5px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .pagination-btn {
+            padding: 8px 12px;
+            background: #1e3c72;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 1.2rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+            min-width: 40px;
+            height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .pagination-btn:hover:not(:disabled) {
+            background: #2d5aa0;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+
+        .pagination-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
+        .pagination-info {
+            font-weight: bold;
+            color: #1e3c72;
+            font-size: 0.9rem;
+            padding: 0 5px;
+        }
+
+        .order-block {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border: 2px solid #e0e0e0;
+            cursor: pointer;
+            transition: all 0.3s;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        .order-block:hover {
+            border-color: #1e3c72;
+            transform: translateY(-3px);
+            box-shadow: 0 4px 12px rgba(30, 60, 114, 0.2);
+        }
+
+        .order-block.processed {
+            opacity: 0.6;
+            background: #e8f5e9;
+            border-color: #4caf50;
+        }
+
+        .order-block.processed::after {
+            content: '✅ ОБРАБОТАН';
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: #4caf50;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: bold;
+        }
+
+        .order-block.pending-click {
+            border-color: #ff9800 !important;
+            background: #fff3e0 !important;
+            box-shadow: 0 0 0 3px rgba(255, 152, 0, 0.3) !important;
+            animation: pulse 0.5s ease-in-out infinite alternate;
+        }
+
+        .order-block.pending-click::before {
+            content: '👆 Нажмите еще раз';
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            background: #ff9800;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            z-index: 10;
+            animation: countdown 2s linear;
+        }
+
+        @keyframes pulse {
+            from {
+                box-shadow: 0 0 0 3px rgba(255, 152, 0, 0.3);
+            }
+            to {
+                box-shadow: 0 0 0 6px rgba(255, 152, 0, 0.1);
+            }
+        }
+
+        @keyframes countdown {
+            from {
+                opacity: 1;
+            }
+            to {
+                opacity: 0.5;
+            }
+        }
+
+        .order-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #f0f0f0;
+            flex-shrink: 0;
+        }
+
+        .order-id {
+            font-weight: bold;
+            color: #1e3c72;
+            font-size: 1.2rem;
+        }
+
+        .order-status {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: bold;
+        }
+
+        .status-pending {
+            background: #ffc107;
+            color: #333;
+        }
+
+        .status-preparing {
+            background: #2196f3;
+            color: white;
+        }
+
+        .status-ready {
+            background: #4caf50;
+            color: white;
+        }
+
+        .status-delivered {
+            background: #9e9e9e;
+            color: white;
+        }
+
+        .order-time {
+            color: #666;
+            font-size: 0.9rem;
+            margin-bottom: 15px;
+            flex-shrink: 0;
+        }
+
+        .order-content {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            overflow-x: hidden;
+            padding-right: 5px;
+        }
+
+        .order-content::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .order-content::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 3px;
+        }
+
+        .order-content::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 3px;
+        }
+
+        .order-content::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+
+        .set-block {
+            background: #f0f4ff;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-left: 4px solid #1e3c72;
+            border: 2px solid #1e3c72;
+        }
+
+        .separator {
+            height: 2px;
+            background: linear-gradient(90deg, transparent, #1e3c72, transparent);
+            margin: 15px 0;
+            border-radius: 2px;
+        }
+
+        .separator-label {
+            text-align: center;
+            color: #1e3c72;
+            font-weight: bold;
+            font-size: 0.9rem;
+            margin: 10px 0;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .set-title {
+            font-weight: bold;
+            color: #1e3c72;
+            font-size: 1.1rem;
+            margin-bottom: 10px;
+        }
+
+        .pizza-item {
+            padding: 10px;
+            margin: 8px 0;
+            background: white;
+            border-radius: 6px;
+            border: 1px solid #e0e0e0;
+        }
+
+        .pizza-item-name {
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        .pizza-item-ingredients {
+            font-size: 0.85rem;
+            color: #666;
+            margin: 5px 0;
+        }
+
+        .info-icon {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            margin-left: 8px;
+            cursor: pointer;
+            color: #1e3c72;
+            font-size: 0.9rem;
+            vertical-align: middle;
+            transition: all 0.2s;
+        }
+
+        .info-icon:hover {
+            color: #ff6b6b;
+            transform: scale(1.2);
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 2000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+            animation: fadeIn 0.3s;
+        }
+
+        .modal-content {
+            background-color: white;
+            margin: 0;
+            padding: 30px;
+            border-radius: 16px;
+            width: 90%;
+            max-width: 500px;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            animation: slideDown 0.3s;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        .modal-title {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #1e3c72;
+        }
+
+        .close-modal {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #999;
+            cursor: pointer;
+            line-height: 1;
+            transition: color 0.2s;
+        }
+
+        .close-modal:hover {
+            color: #ff6b6b;
+        }
+
+        .ingredient-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .ingredient-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px;
+            margin: 8px 0;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border-left: 3px solid #1e3c72;
+        }
+
+        .ingredient-name {
+            font-weight: 600;
+            color: #333;
+        }
+
+        .ingredient-amount {
+            color: #1e3c72;
+            font-weight: bold;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        @keyframes slideDown {
+            from { transform: translateY(-50px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        .pizza-item-extras {
+            font-size: 0.85rem;
+            color: #4caf50;
+            margin-top: 5px;
+        }
+
+        .pizza-item-quantity {
+            display: inline-block;
+            background: #1e3c72;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            margin-left: 8px;
+        }
+
+        .order-total {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-top: 15px;
+            border-top: 2px solid #f0f0f0;
+            margin-top: 15px;
+        }
+
+        .total-label {
+            font-weight: bold;
+            color: #333;
+        }
+
+        .total-price {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #1e3c72;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999;
+            background: white;
+            border-radius: 12px;
+            grid-column: 1 / -1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 400px;
+        }
+
+        .empty-state-icon {
+            font-size: 4rem;
+            margin-bottom: 20px;
+        }
+
+        .hint {
+            font-size: 0.85rem;
+            color: #999;
+            margin-top: 10px;
+            font-style: italic;
+        }
+
+        .kitchen-info {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+
+        .courier-info {
+            background: #d1ecf1;
+            border-left: 4px solid #17a2b8;
+            padding: 8px;
+            margin: 5px 0;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+
+        .admin-info {
+            background: #f8d7da;
+            border-left: 4px solid #dc3545;
+            padding: 8px;
+            margin: 5px 0;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="top-bar">
+            <div class="current-time" id="currentTime">--:--:--</div>
+            <div class="role-selector">
+                <label for="roleSelect">Роль:</label>
+                <select id="roleSelect" onchange="changeRole(this.value)">
+                    <option value="kitchen">Кухня</option>
+                    <option value="courier">Курьер</option>
+                    <option value="admin">Админ</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="pagination-wrapper">
+                <div class="pagination-controls" id="paginationControls" style="display: none;">
+                    <button class="pagination-btn" id="prevBtn" onclick="changePage(-1)" title="Назад">←</button>
+                    <span class="pagination-info" id="pageInfo">1/1</span>
+                    <button class="pagination-btn" id="nextBtn" onclick="changePage(1)" title="Вперед">→</button>
+                </div>
+        </div>
+
+        <div class="orders-container">
+            <div class="orders-grid" id="ordersList"></div>
+        </div>
+    </div>
+
+    <!-- Глобальная модалка для ингредиентов -->
+    <div id="ingredientsModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title" id="modalTitle">📋 Ингредиенты</div>
+                <span class="close-modal" onclick="closeModal('ingredientsModal')">&times;</span>
+            </div>
+            <ul class="ingredient-list" id="modalIngredientList"></ul>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8080/api/v1';
+        
+        // Определяем роль из URL параметра или localStorage
+        const urlParams = new URLSearchParams(window.location.search);
+        let currentRole = urlParams.get('role') || localStorage.getItem('erp_role') || 'kitchen';
+        localStorage.setItem('erp_role', currentRole);
+        
+        let orders = [];
+        let processedCount = 0;
+        let totalCount = 0;
+        let hasMore = false;
+        let currentPage = 0;
+        const ordersPerPage = 3;
+        
+        // WebSocket подключение для real-time обновлений
+        let ws = null;
+        let wsReconnectTimer = null;
+        const WS_RECONNECT_DELAY = 3000; // 3 секунды между переподключениями
+        
+        // AudioContext для звука (создается один раз после первого взаимодействия)
+        let audioContext = null;
+        let audioContextInitialized = false;
+        
+        // Инициализация AudioContext после первого взаимодействия пользователя
+        function initAudioContext() {
+            if (!audioContextInitialized) {
+                try {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    audioContextInitialized = true;
+                    console.log('✅ AudioContext инициализирован');
+                } catch (error) {
+                    console.warn('Не удалось создать AudioContext:', error);
+                }
+            }
+        }
+        
+        // Инициализируем AudioContext при первом клике пользователя
+        document.addEventListener('click', initAudioContext, { once: true });
+        document.addEventListener('touchstart', initAudioContext, { once: true });
+        
+        // Функция для воспроизведения звука уведомления
+        function playNotificationSound() {
+            // Если AudioContext еще не инициализирован, пытаемся инициализировать
+            if (!audioContextInitialized) {
+                initAudioContext();
+            }
+            
+            // Если AudioContext все еще не готов, пропускаем звук
+            if (!audioContext) {
+                console.warn('AudioContext не готов, звук пропущен');
+                return;
+            }
+            
+            try {
+                // Проверяем состояние AudioContext (может быть suspended)
+                if (audioContext.state === 'suspended') {
+                    audioContext.resume().then(() => {
+                        playSound();
+                    }).catch(err => {
+                        console.warn('Не удалось возобновить AudioContext:', err);
+                    });
+                } else {
+                    playSound();
+                }
+            } catch (error) {
+                console.warn('Не удалось воспроизвести звук:', error);
+            }
+            
+            function playSound() {
+                try {
+                    const oscillator = audioContext.createOscillator();
+                    const gainNode = audioContext.createGain();
+                    
+                    // Подключаем узлы
+                    oscillator.connect(gainNode);
+                    gainNode.connect(audioContext.destination);
+                    
+                    // Настраиваем звук (приятный тон)
+                    oscillator.frequency.value = 800; // Частота в Гц
+                    oscillator.type = 'sine'; // Синусоидальный тон
+                    
+                    // Настраиваем громкость (плавное нарастание и затухание)
+                    gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+                    gainNode.gain.linearRampToValueAtTime(0.3, audioContext.currentTime + 0.01);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+                    
+                    // Воспроизводим звук
+                    oscillator.start(audioContext.currentTime);
+                    oscillator.stop(audioContext.currentTime + 0.3);
+                } catch (error) {
+                    console.warn('Ошибка воспроизведения звука:', error);
+                }
+            }
+        }
+
+        // Подключение к WebSocket
+        function connectWebSocket() {
+            // Определяем URL WebSocket на основе API_BASE
+            const apiUrl = new URL(API_BASE);
+            const wsProtocol = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${wsProtocol}//${apiUrl.host}/api/v1/erp/ws`;
+            
+            try {
+                ws = new WebSocket(wsUrl);
+                
+                ws.onopen = () => {
+                    console.log('✅ WebSocket подключен для ERP');
+                    // Загружаем начальные данные
+                    loadBatch();
+                };
+                
+                ws.onmessage = (event) => {
+                    try {
+                        const message = JSON.parse(event.data);
+                        handleWebSocketMessage(message);
+                    } catch (error) {
+                        console.error('Ошибка парсинга WebSocket сообщения:', error);
+                    }
+                };
+                
+                ws.onerror = (error) => {
+                    console.error('❌ WebSocket ошибка:', error);
+                };
+                
+                ws.onclose = () => {
+                    console.log('⚠️ WebSocket отключен, переподключаемся...');
+                    ws = null;
+                    // Переподключаемся через 3 секунды
+                    if (wsReconnectTimer) {
+                        clearTimeout(wsReconnectTimer);
+                    }
+                    wsReconnectTimer = setTimeout(connectWebSocket, WS_RECONNECT_DELAY);
+                };
+            } catch (error) {
+                console.error('Ошибка создания WebSocket:', error);
+                // Fallback на polling если WebSocket недоступен
+                startPolling();
+            }
+        }
+        
+        // Обработка сообщений от WebSocket
+        function handleWebSocketMessage(message) {
+            switch (message.type) {
+                case 'order_processed':
+                    // Заказ обработан - обновляем список
+                    console.log('📦 Заказ обработан через WebSocket:', message.data);
+                    loadBatch();
+                    break;
+                case 'new_order':
+                    // Новый заказ - обновляем список
+                    console.log('🆕 Новый заказ через WebSocket:', message.data);
+                    // Проверяем, был ли список пустым перед обновлением
+                    const wasEmpty = orders.length === 0;
+                    // Принудительно обновляем список заказов
+                    loadBatch().then(() => {
+                        console.log('📋 Заказов после обновления:', orders.length);
+                        // Если список был пустым, а теперь есть заказы - воспроизводим звук
+                        if (wasEmpty && orders.length > 0) {
+                            console.log('🔔 Воспроизводим звук уведомления');
+                            playNotificationSound();
+                        }
+                    }).catch(err => {
+                        console.error('❌ Ошибка при обновлении заказов:', err);
+                    });
+                    break;
+                case 'order_updated':
+                    // Заказ обновлен - обновляем список
+                    console.log('🔄 Заказ обновлен через WebSocket:', message.data);
+                    loadBatch();
+                    break;
+                default:
+                    console.log('📨 WebSocket сообщение:', message);
+            }
+        }
+        
+        // Polling как fallback (если WebSocket недоступен)
+        let pollingInterval = null;
+        function startPolling() {
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+            }
+            // Polling каждые 5 секунд
+            pollingInterval = setInterval(() => {
+                loadBatch();
+            }, 5000);
+            console.log('🔄 Polling запущен (fallback режим)');
+        }
+        
+        // Смена роли
+        function changeRole(newRole) {
+            currentRole = newRole;
+            localStorage.setItem('erp_role', newRole);
+            loadBatch(); // Перезагружаем заказы с новой ролью
+        }
+
+        // Получить информацию в зависимости от роли
+        function getRoleSpecificInfo(order, orderItems) {
+            let info = '';
+            
+            // Информация для поваров (что не класть)
+            if (currentRole === 'kitchen' || currentRole === 'admin') {
+                const excludeItems = [];
+                orderItems.forEach(item => {
+                    if (item.exclude_ingredients && item.exclude_ingredients.length > 0) {
+                        excludeItems.push(`${item.pizza_name || 'Пицца'}: не класть ${item.exclude_ingredients.join(', ')}`);
+                    }
+                });
+                if (excludeItems.length > 0) {
+                    info += `<div class="kitchen-info"><strong>⚠️ Не класть:</strong><br>${excludeItems.join('<br>')}</div>`;
+                }
+            }
+            
+            // Информация для курьеров
+            if (currentRole === 'courier' || currentRole === 'admin') {
+                if (order.delivery_address) {
+                    info += `<div class="courier-info"><strong>📍 Адрес:</strong> ${order.delivery_address}</div>`;
+                }
+                if (order.customer_phone) {
+                    info += `<div class="courier-info"><strong>📞 Телефон:</strong> ${order.customer_phone}</div>`;
+                }
+                if (order.call_before_minutes && order.call_before_minutes > 0) {
+                    info += `<div class="courier-info"><strong>⏰ Позвонить за:</strong> ${order.call_before_minutes} минут до доставки</div>`;
+                }
+                if (order.payment_method) {
+                    const paymentText = {
+                        'CASH': 'Наличные',
+                        'CARD_ONLINE': 'Карта онлайн',
+                        'CRYPTO': 'Криптовалюта'
+                    };
+                    info += `<div class="courier-info"><strong>💳 Оплата:</strong> ${paymentText[order.payment_method] || order.payment_method}</div>`;
+                }
+                if (order.is_pickup) {
+                    info += `<div class="courier-info"><strong>🚶 Самовывоз</strong></div>`;
+                }
+            }
+            
+            // Информация для админов (скидки, итоговая цена)
+            if (currentRole === 'admin') {
+                if (order.discount_amount > 0 || order.discount_percent > 0) {
+                    info += `<div class="admin-info"><strong>💰 Скидка:</strong> `;
+                    if (order.discount_percent > 0) {
+                        info += `${order.discount_percent}%`;
+                    }
+                    if (order.discount_amount > 0) {
+                        if (order.discount_percent > 0) info += ' или ';
+                        info += `${order.discount_amount} ₽`;
+                    }
+                    info += `</div>`;
+                }
+                if (order.final_price && order.final_price !== order.total_price) {
+                    info += `<div class="admin-info"><strong>💵 Итоговая цена:</strong> ${order.final_price} ₽</div>`;
+                }
+                if (order.notes) {
+                    info += `<div class="admin-info"><strong>📝 Заметки:</strong> ${order.notes}</div>`;
+                }
+            }
+            
+            return info;
+        }
+
+        // Обновление времени
+        function updateTime() {
+            const timeElement = document.getElementById('currentTime');
+            if (!timeElement) {
+                return; // Элемент еще не загружен
+            }
+            
+            const now = new Date();
+            const timeString = now.toLocaleTimeString('ru-RU', { 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit' 
+            });
+            timeElement.textContent = timeString;
+        }
+
+        async function loadBatch() {
+            const ordersList = document.getElementById('ordersList');
+            
+            // Сохраняем состояние до загрузки (для проверки, был ли список пустым)
+            const wasEmpty = orders.length === 0;
+            
+            try {
+                // Добавляем роль в запрос
+                const response = await fetch(`${API_BASE}/erp/orders/batch?role=${currentRole}`);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                
+                // Отладка: выводим что пришло с сервера
+                console.log('📦 Данные с сервера:', data);
+                if (data.orders && data.orders.length > 0) {
+                    console.log('📋 Первый заказ:', data.orders[0]);
+                    console.log('📋 Поля заказа:', Object.keys(data.orders[0]));
+                    console.log('📋 Items заказа:', data.orders[0].items);
+                    if (data.orders[0].items && data.orders[0].items.length > 0) {
+                        console.log('📋 Первый item:', data.orders[0].items[0]);
+                        console.log('📋 set_name в item:', data.orders[0].items[0].set_name);
+                        console.log('📋 is_set_item в item:', data.orders[0].items[0].is_set_item);
+                    }
+                }
+                
+                const previousOrdersCount = orders.length;
+                orders = data.orders || [];
+                processedCount = data.processed || 0;
+                totalCount = data.total || 0;
+                hasMore = data.has_more || false;
+                
+                // Сбрасываем страницу при новой загрузке
+                currentPage = 0;
+                
+                renderOrders();
+                
+                // Если список был пустым, а теперь есть заказы - воспроизводим звук
+                if (wasEmpty && orders.length > 0) {
+                    playNotificationSound();
+                }
+            } catch (error) {
+                console.error('Ошибка загрузки заказов:', error);
+                
+                let errorMessage = error.message;
+                if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+                    errorMessage = 'Не удалось подключиться к серверу. Проверьте, что сервер запущен.';
+                }
+                
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'empty-state';
+                errorDiv.innerHTML = `
+                    <div class="empty-state-icon">❌</div>
+                    <p>Ошибка загрузки заказов</p>
+                    <p style="font-size: 0.9rem; margin-top: 10px; color: #f44336;">${errorMessage}</p>
+                `;
+                ordersList.innerHTML = '';
+                ordersList.appendChild(errorDiv);
+            }
+        }
+
+
+        async function markOrderProcessed(orderId) {
+            try {
+                const response = await fetch(`${API_BASE}/erp/orders/${orderId}/processed`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Ошибка отметки заказа');
+                }
+                
+                await loadBatch();
+            } catch (error) {
+                console.error('Ошибка отметки заказа:', error);
+                alert('❌ Ошибка: ' + error.message);
+            }
+        }
+
+        function renderOrders() {
+            const ordersList = document.getElementById('ordersList');
+            const paginationControls = document.getElementById('paginationControls');
+            
+            if (orders.length === 0) {
+                const emptyDiv = document.createElement('div');
+                emptyDiv.className = 'empty-state';
+                emptyDiv.innerHTML = `
+                    <div class="empty-state-icon">📦</div>
+                    <p>Заказы не найдены</p>
+                    <p style="font-size: 0.9rem; margin-top: 10px;">Заказы появятся здесь после оформления в магазине</p>
+                `;
+                ordersList.innerHTML = '';
+                ordersList.appendChild(emptyDiv);
+                paginationControls.style.display = 'none';
+                return;
+            }
+
+            // Вычисляем пагинацию
+            const totalPages = Math.ceil(orders.length / ordersPerPage);
+            const startIndex = currentPage * ordersPerPage;
+            const endIndex = Math.min(startIndex + ordersPerPage, orders.length);
+            const currentOrders = orders.slice(startIndex, endIndex);
+
+            ordersList.innerHTML = '';
+            
+            // Добавляем пустые блоки, если заказов меньше 3
+            for (let i = 0; i < ordersPerPage; i++) {
+                if (i < currentOrders.length) {
+                    const order = currentOrders[i];
+                    renderOrderBlock(order, ordersList);
+                } else {
+                    // Пустой блок для заполнения сетки
+                    const emptyBlock = document.createElement('div');
+                    emptyBlock.className = 'order-block';
+                    emptyBlock.style.visibility = 'hidden';
+                    ordersList.appendChild(emptyBlock);
+                }
+            }
+            
+            // Обновляем пагинацию
+            updatePagination(totalPages);
+        }
+
+        function renderOrderBlock(order, ordersList) {
+                // Защита от невалидных заказов
+                if (!order || !order.id) {
+                    console.warn('Пропущен невалидный заказ:', order);
+                    return;
+                }
+                
+                // Отладка: выводим структуру заказа
+                console.log('🔍 Обрабатываем заказ:', order.id);
+                console.log('🔍 Поля заказа:', Object.keys(order));
+                console.log('🔍 order.items:', order.items);
+                console.log('🔍 order.Items:', order.Items);
+                
+                const orderBlock = document.createElement('div');
+                orderBlock.className = 'order-block';
+                
+                // Двойное нажатие в течение 2 секунд - отметить как готовый
+                let pendingClickTimer = null;
+                let isPendingClick = false;
+                
+                orderBlock.onclick = (e) => {
+                    e.stopPropagation();
+                    
+                    // Если уже обработан, игнорируем
+                    if (orderBlock.classList.contains('processed')) {
+                        return;
+                    }
+                    
+                    // Если кликнули на другой заказ - отменяем предыдущий выбор
+                    if (window.pendingOrderClick.element && window.pendingOrderClick.element !== orderBlock) {
+                        window.pendingOrderClick.element.classList.remove('pending-click');
+                        if (window.pendingOrderClick.timer) {
+                            clearTimeout(window.pendingOrderClick.timer);
+                        }
+                    }
+                    
+                    if (!orderBlock.classList.contains('pending-click')) {
+                        // Первый клик - начинаем отсчет
+                        orderBlock.classList.add('pending-click');
+                        window.pendingOrderClick.element = orderBlock;
+                        
+                        // Отменяем предыдущий таймер если был
+                        if (window.pendingOrderClick.timer) {
+                            clearTimeout(window.pendingOrderClick.timer);
+                        }
+                        
+                        // Устанавливаем таймер на 2 секунды
+                        window.pendingOrderClick.timer = setTimeout(() => {
+                            // Время вышло - отменяем выбор
+                            if (window.pendingOrderClick.element) {
+                                window.pendingOrderClick.element.classList.remove('pending-click');
+                                window.pendingOrderClick.element = null;
+                            }
+                            window.pendingOrderClick.timer = null;
+                        }, 2000);
+                    } else {
+                        // Второй клик в течение 2 секунд - отмечаем заказ
+                        if (window.pendingOrderClick.timer) {
+                            clearTimeout(window.pendingOrderClick.timer);
+                            window.pendingOrderClick.timer = null;
+                        }
+                        orderBlock.classList.remove('pending-click');
+                        window.pendingOrderClick.element = null;
+                        
+                        if (order.id) {
+                            markOrderProcessed(order.id);
+                        }
+                    }
+                };
+                
+                const orderStatus = order.status || 'pending';
+                const statusClass = `status-${orderStatus}`;
+                const statusText = {
+                    'pending': 'Ожидает',
+                    'preparing': 'Готовится',
+                    'ready': 'Готов',
+                    'delivered': 'Доставлен'
+                };
+
+                // Безопасная обработка даты
+                let timeString = '--:--';
+                let dateString = '--';
+                try {
+                    if (order.created_at) {
+                        const orderDate = new Date(order.created_at);
+                        if (!isNaN(orderDate.getTime())) {
+                            timeString = orderDate.toLocaleTimeString('ru-RU', { 
+                                hour: '2-digit', 
+                                minute: '2-digit' 
+                            });
+                            dateString = orderDate.toLocaleDateString('ru-RU');
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Ошибка парсинга даты заказа:', order.created_at, e);
+                }
+
+                let contentHtml = '';
+
+                // Проверяем наличие items (пробуем оба варианта: items и Items)
+                const orderItems = order.items || order.Items || [];
+                
+                // Отладка
+                if (orderItems.length === 0) {
+                    console.warn('⚠️ Заказ без элементов!', {
+                        orderId: order.id,
+                        hasItems: !!order.items,
+                        hasItemsCapital: !!order.Items,
+                        orderKeys: Object.keys(order)
+                    });
+                }
+
+                // Функция для рендеринга одного элемента пиццы
+                function renderPizzaItem(item, itemIndex) {
+                    const pizzaName = item.pizza_name || 'Без названия';
+                    const quantity = item.quantity || 1;
+                    const extras = item.extras && item.extras.length > 0 
+                        ? '<div class="pizza-item-extras"><strong>Допы:</strong> ' + item.extras.join(', ') + '</div>' 
+                        : '';
+                    const price = item.price || 0;
+                    const ingredientAmounts = item.ingredient_amounts || {};
+                    const ingredients = item.ingredients || [];
+                    
+                    // Уникальный ключ для данных модалки
+                    const modalDataKey = 'modal-data-' + itemIndex + '-' + Date.now();
+                    
+                    // Сохраняем данные для модалки в глобальном объекте
+                    if (!window.modalData) window.modalData = {};
+                    window.modalData[modalDataKey] = {
+                        pizzaName: pizzaName,
+                        ingredients: ingredients,
+                        ingredientAmounts: ingredientAmounts
+                    };
+                    
+                    // Показываем цену только для админов и курьеров, не для поваров
+                    const priceHtml = (currentRole !== 'kitchen') 
+                        ? '<div style="margin-top: 8px; font-weight: bold; color: #1e3c72;">Цена: ' + price + ' ₽</div>' 
+                        : '';
+                    
+                    return '<div class="pizza-item">' +
+                        '<div class="pizza-item-name">' + pizzaName +
+                        '<span class="pizza-item-quantity">x' + quantity + '</span>' +
+                        '<span class="info-icon" onclick="openIngredientsModal(\'' + modalDataKey + '\')" title="Ингредиенты и дозировка">ℹ️</span>' +
+                        '</div>' +
+                        extras +
+                        priceHtml +
+                        '</div>';
+                }
+
+                // Собираем контент: группируем по наборам, потом отдельные пиццы
+                contentHtml = '';
+                
+                // Группируем items по наборам (если у item есть set_name)
+                const setsMap = new Map(); // Map<setName, items[]>
+                const individualItems = [];
+                
+                console.log('🔍 Группировка items. Всего items:', orderItems.length);
+                
+                orderItems.forEach((item, idx) => {
+                    // Проверяем оба варианта написания (snake_case и camelCase)
+                    const setName = item.set_name || item.setName;
+                    const isSetItem = item.is_set_item !== undefined ? item.is_set_item : (item.isSetItem !== undefined ? item.isSetItem : false);
+                    
+                    console.log(`🔍 Item ${idx}:`, {
+                        pizza_name: item.pizza_name,
+                        set_name: setName,
+                        is_set_item: isSetItem,
+                        allKeys: Object.keys(item)
+                    });
+                    
+                    // Если есть set_name, значит это элемент набора
+                    if (setName) {
+                        // Это элемент набора
+                        if (!setsMap.has(setName)) {
+                            setsMap.set(setName, []);
+                        }
+                        setsMap.get(setName).push(item);
+                        console.log(`✅ Добавлен в набор: ${setName}`);
+                    } else {
+                        // Это отдельная пицца
+                        individualItems.push(item);
+                        console.log(`✅ Добавлен как отдельная пицца`);
+                    }
+                });
+                
+                console.log('📊 Результат группировки:', {
+                    setsCount: setsMap.size,
+                    individualCount: individualItems.length,
+                    setsNames: Array.from(setsMap.keys())
+                });
+                
+                // Показываем наборы
+                setsMap.forEach((setItems, setName) => {
+                    let itemsHtml = '';
+                    if (setItems.length > 0) {
+                        itemsHtml = setItems.map((item, idx) => renderPizzaItem(item, 'set-' + setName + '-' + idx)).join('');
+                    } else {
+                        itemsHtml = '<div class="pizza-item">Нет элементов в наборе</div>';
+                    }
+                    contentHtml += '<div class="set-block">' +
+                        '<div class="set-title">📦 Набор: ' + (setName || 'Набор') + '</div>' +
+                        itemsHtml +
+                        '</div>';
+                });
+                
+                // Если есть наборы и отдельные пиццы - добавляем разделитель
+                if (setsMap.size > 0 && individualItems.length > 0) {
+                    contentHtml += '<div class="separator"></div>';
+                }
+                
+                // Показываем отдельные пиццы
+                if (individualItems.length > 0) {
+                    contentHtml += individualItems.map((item, idx) => renderPizzaItem(item, 'ind-' + idx)).join('');
+                } else if (setsMap.size === 0 && orderItems.length === 0) {
+                    contentHtml = '<div class="pizza-item">Нет элементов в заказе</div>';
+                }
+                
+                // Безопасное получение DisplayID и последние 4 цифры
+                const displayId = String(order.display_id || order.displayId || order.id || '0000');
+                // Извлекаем только цифры из display_id
+                const digitsOnly = displayId.replace(/\D/g, '');
+                // Берем последние 4 цифры
+                const orderIdShort = digitsOnly.length >= 4 
+                    ? digitsOnly.slice(-4) 
+                    : digitsOnly.padStart(4, '0');
+                
+                // Безопасное получение цены
+                const totalPrice = order.total_price || order.totalPrice || 0;
+                
+                // Показываем итоговую цену только для админов и курьеров, не для поваров
+                const totalPriceHtml = (currentRole !== 'kitchen') 
+                    ? `<div class="order-total">
+                        <span class="total-label">Итого:</span>
+                        <span class="total-price">${totalPrice} ₽</span>
+                    </div>`
+                    : '';
+                
+                orderBlock.innerHTML = `
+                    <div class="order-header">
+                        <span class="order-id">Заказ #${orderIdShort}</span>
+                        <span class="order-status ${statusClass}">${statusText[orderStatus] || orderStatus}</span>
+                    </div>
+                    <div class="order-time">${dateString} ${timeString}</div>
+                    <div class="order-content">
+                        ${contentHtml}
+                    </div>
+                    ${totalPriceHtml}
+                    ${getRoleSpecificInfo(order, orderItems)}
+                    <div class="hint">💡 Двойной клик для отметки как готовый</div>
+                `;
+                
+                // Добавляем заказ в DOM
+                try {
+                    ordersList.appendChild(orderBlock);
+                    console.log('✅ Заказ добавлен в DOM:', order.id);
+                } catch (error) {
+                    console.error('❌ Ошибка добавления заказа в DOM:', error, order);
+                }
+        }
+
+        function updatePagination(totalPages) {
+            const paginationControls = document.getElementById('paginationControls');
+            const prevBtn = document.getElementById('prevBtn');
+            const nextBtn = document.getElementById('nextBtn');
+            const pageInfo = document.getElementById('pageInfo');
+            
+            if (totalPages <= 1) {
+                paginationControls.style.display = 'none';
+                return;
+            }
+            
+            paginationControls.style.display = 'flex';
+            pageInfo.textContent = `${currentPage + 1}/${totalPages}`;
+            
+            prevBtn.disabled = currentPage === 0;
+            nextBtn.disabled = currentPage >= totalPages - 1;
+        }
+
+        function changePage(direction) {
+            const totalPages = Math.ceil(orders.length / ordersPerPage);
+            const newPage = currentPage + direction;
+            
+            if (newPage >= 0 && newPage < totalPages) {
+                currentPage = newPage;
+                renderOrders();
+            }
+        }
+
+        // Функции для работы с модалкой
+        function openIngredientsModal(modalDataKey) {
+            if (!window.modalData || !window.modalData[modalDataKey]) {
+                console.error('Данные модалки не найдены:', modalDataKey);
+                return;
+            }
+            
+            const data = window.modalData[modalDataKey];
+            const modal = document.getElementById('ingredientsModal');
+            const titleEl = document.getElementById('modalTitle');
+            const listEl = document.getElementById('modalIngredientList');
+            
+            if (!modal || !titleEl || !listEl) {
+                console.error('Элементы модалки не найдены');
+                return;
+            }
+            
+            // Устанавливаем заголовок
+            titleEl.textContent = '📋 ' + data.pizzaName + ' - Ингредиенты';
+            
+            // Очищаем и заполняем список ингредиентов
+            listEl.innerHTML = '';
+            data.ingredients.forEach(ing => {
+                const amount = data.ingredientAmounts[ing] || 80;
+                const li = document.createElement('li');
+                li.className = 'ingredient-item';
+                li.innerHTML = '<span class="ingredient-name">' + ing + '</span>' +
+                    '<span class="ingredient-amount">' + amount + ' г</span>';
+                listEl.appendChild(li);
+            });
+            
+            // Показываем модалку
+            modal.style.display = 'block';
+        }
+
+        function closeModal(modalId) {
+            const modal = document.getElementById(modalId);
+            if (modal) {
+                modal.style.display = 'none';
+            }
+        }
+
+        // Закрытие модалки при клике вне её
+        window.onclick = function(event) {
+            if (event.target.classList.contains('modal')) {
+                event.target.style.display = 'none';
+            }
+        }
+
+        // Инициализация
+        // Инициализация глобальной переменной для отслеживания выбора
+        window.pendingOrderClick = {
+            element: null,
+            timer: null
+        };
+
+        // Глобальный обработчик для отмены выбора при клике вне заказа
+        document.addEventListener('click', (e) => {
+            // Если кликнули не на order-block и есть активный выбор
+            if (!e.target.closest('.order-block') && window.pendingOrderClick && window.pendingOrderClick.element) {
+                window.pendingOrderClick.element.classList.remove('pending-click');
+                if (window.pendingOrderClick.timer) {
+                    clearTimeout(window.pendingOrderClick.timer);
+                }
+                window.pendingOrderClick.element = null;
+                window.pendingOrderClick.timer = null;
+            }
+        }, true); // Используем capture phase для раннего перехвата
+
+        function init() {
+            // Устанавливаем выбранную роль в селекторе
+            const roleSelect = document.getElementById('roleSelect');
+            if (roleSelect) {
+                roleSelect.value = currentRole;
+            }
+            
+            // Инициализируем обновление времени
+            updateTime(); // Первый вызов сразу
+            setInterval(updateTime, 1000); // Затем каждую секунду
+            
+            const ordersList = document.getElementById('ordersList');
+            const emptyDiv = document.createElement('div');
+            emptyDiv.className = 'empty-state';
+            emptyDiv.innerHTML = `
+                <div class="empty-state-icon">📦</div>
+                <p>Загрузка заказов...</p>
+            `;
+            ordersList.innerHTML = '';
+            ordersList.appendChild(emptyDiv);
+            
+            // Подключаемся к WebSocket для real-time обновлений
+            connectWebSocket();
+        }
+
+        // Закрываем WebSocket при закрытии страницы
+        window.addEventListener('beforeunload', () => {
+            if (ws) {
+                ws.close();
+            }
+            if (wsReconnectTimer) {
+                clearTimeout(wsReconnectTimer);
+            }
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+            }
+        });
+
+        // Ждем загрузки DOM перед инициализацией
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
+    </script>
+</body>
+</html>

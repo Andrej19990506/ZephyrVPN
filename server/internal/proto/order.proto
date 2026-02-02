@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package order;
+
+// Путь, где будет лежать сгенерированный код
+option go_package = "./internal/pb";
+option java_package = "com.erp.kitchen.proto";
+option java_outer_classname = "OrderProto";
+
+// Описание заказа
+message PizzaOrderRequest {
+    int32 customer_id = 1;
+    string pizza_name = 2;
+    repeated string ingredients = 3;
+    repeated string extras = 4;
+    int32 quantity = 5;
+    
+    // Данные клиента
+    string customer_first_name = 6; // Имя клиента
+    string customer_last_name = 7;  // Фамилия клиента
+    string customer_phone = 8;     // Номер телефона
+    string delivery_address = 9;    // Адрес доставки
+    bool is_pickup = 10;            // Самовывоз
+    string pickup_location_id = 11; // ID филиала для самовывоза
+}
+
+// Ответ сервера
+message OrderResponse {
+    string order_id = 1;
+    string display_id = 2;
+    string status = 3;
+}
+
+// Полный заказ для хранения в Redis (Protobuf формат)
+message PizzaOrder {
+    string id = 1;
+    string display_id = 2;
+    int32 customer_id = 3;
+    repeated PizzaItem items = 4;
+    bool is_set = 5;
+    string set_name = 6;
+    int32 total_price = 7;
+    int64 created_at = 8; // Unix timestamp в наносекундах
+    string status = 9;
+    string target_slot_id = 15; // ID временного слота (Capacity-Based Slot Scheduling)
+    string visible_at = 16; // RFC3339 - время, когда заказ должен появиться на планшете повара
+    
+    // Данные клиента
+    string customer_first_name = 17; // Имя клиента
+    string customer_last_name = 18;  // Фамилия клиента
+    string customer_phone = 19;      // Номер телефона
+    string delivery_address = 20;    // Адрес доставки
+    bool is_pickup = 21;             // Самовывоз
+    string pickup_location_id = 22;  // ID филиала для самовывоза
+}
+
+// Элемент заказа
+message PizzaItem {
+    string pizza_name = 1;
+    repeated string ingredients = 2;
+    map<string, int32> ingredient_amounts = 6; // Дозировка ингредиентов в граммах
+    repeated string extras = 3;
+    int32 quantity = 4;
+    int32 price = 5;
+    string set_name = 7; // Название набора, если это элемент набора
+    bool is_set_item = 8; // Флаг что это элемент набора
+}
+
+// Описание самого сервиса (аналог контроллера)
+service OrderService {
+    rpc CreateOrder(PizzaOrderRequest) returns (OrderResponse);
+}

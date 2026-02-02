@@ -1,0 +1,11 @@
+@echo off
+echo 🚀 Запуск нагрузочного теста через Docker
+echo.
+echo Убедитесь что сервер запущен: docker-compose up
+echo.
+pause
+
+docker run --rm -v "%CD%":/app -w /app --network host golang:1.23-alpine go run bomb.go
+
+pause
+
