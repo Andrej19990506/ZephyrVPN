@@ -17,7 +17,7 @@ COPY go.mod go.sum ./
 # 2. Скачиваем зависимости (с таймаутом и retry)
 RUN go mod download || (sleep 5 && go mod download) || (sleep 10 && go mod download)
 
-# 3. Копируем ВООБЩЕ ВСЁ остальное
+# 3. Копируем ВООБЩЕ ВСЁ остальное (включая ca.pem если он есть)
 COPY . .
 
 # 4. Проверяем go.sum (пропускаем go mod tidy для избежания проблем с proxy)
@@ -35,6 +35,9 @@ FROM alpine:latest
 RUN apk --no-cache add ca-certificates tzdata
 WORKDIR /app
 COPY --from=builder /app/main /app/main
+# Примечание: ca.pem можно добавить через переменную окружения KAFKA_CA_CERT в Railway
+# Или раскомментировать следующую строку, если файл ca.pem есть в проекте:
+# COPY --from=builder /app/ca.pem /app/ca.pem
 # Railway автоматически устанавливает PORT, но оставляем 8080 как fallback
 EXPOSE 8080
 # Используем exec form для правильной обработки сигналов
