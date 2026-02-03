@@ -30,9 +30,12 @@ type KafkaWSConsumer struct {
 }
 
 // NewKafkaWSConsumer создает новый Kafka Consumer для WebSocket
-func NewKafkaWSConsumer(brokers string, topic string, redisUtil *utils.RedisClient) *KafkaWSConsumer {
-	brokerList := strings.Split(brokers, ",")
+func NewKafkaWSConsumer(brokers string, topic string, redisUtil *utils.RedisClient, username, password, caCert string) *KafkaWSConsumer {
+	brokerList := ParseKafkaBrokers(brokers)
 	ctx, cancel := context.WithCancel(context.Background())
+	
+	// Создаем dialer с SASL/PLAIN и TLS если нужно
+	dialer := CreateKafkaDialer(username, password, caCert)
 	
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     brokerList,
@@ -42,6 +45,7 @@ func NewKafkaWSConsumer(brokers string, topic string, redisUtil *utils.RedisClie
 		MinBytes:    1,
 		MaxBytes:    10e6,
 		MaxWait:     1 * time.Second,
+		Dialer:      dialer, // Используем dialer с SASL/TLS
 	})
 	
 	return &KafkaWSConsumer{

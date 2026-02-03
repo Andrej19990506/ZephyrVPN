@@ -10,6 +10,9 @@ type Config struct {
 	DatabaseURL    string
 	RedisURL       string
 	KafkaBrokers   string
+	KafkaUsername  string
+	KafkaPassword  string
+	KafkaCACert    string
 	JWTSecret      string
 	ServerPort     string
 	Environment    string
@@ -82,6 +85,9 @@ func Load() *Config {
 		DatabaseURL:      databaseURL,
 		RedisURL:         redisURL,
 		KafkaBrokers:     getEnv("KAFKA_BROKERS", "localhost:9092"),
+		KafkaUsername:    getEnv("KAFKA_USERNAME", ""),
+		KafkaPassword:    getEnv("KAFKA_PASSWORD", ""),
+		KafkaCACert:       getEnv("KAFKA_CA_CERT", ""),
 		JWTSecret:        getEnv("JWT_SECRET", "your-secret-key-change-in-production"),
 		ServerPort:       getEnv("PORT", "8080"),
 		Environment:      getEnv("ENV", "development"),

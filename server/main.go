@@ -37,6 +37,13 @@ func main() {
 		log.Printf("⚠️ DATABASE_URL не установлен, используется значение по умолчанию")
 	}
 
+	// Логируем KAFKA_BROKERS
+	if cfg.KafkaBrokers != "" {
+		log.Printf("📡 KAFKA_BROKERS установлен: %s", cfg.KafkaBrokers)
+	} else {
+		log.Printf("⚠️ KAFKA_BROKERS не установлен, используется значение по умолчанию: localhost:9092")
+	}
+
 	// Подключение к PostgreSQL
 	db, err := database.ConnectPostgres(cfg.DatabaseURL)
 	if err != nil {
@@ -262,12 +269,17 @@ func main() {
 	
 	// Запускаем Kafka Consumer для отправки заказов в WebSocket
 	if cfg.KafkaBrokers != "" && redisUtil != nil {
-		kafkaConsumer := api.NewKafkaWSConsumer(cfg.KafkaBrokers, "pizza-orders", redisUtil)
+		log.Printf("📡 Kafka WS Consumer: используем брокеры: %s", cfg.KafkaBrokers)
+		kafkaConsumer := api.NewKafkaWSConsumer(cfg.KafkaBrokers, "pizza-orders", redisUtil, cfg.KafkaUsername, cfg.KafkaPassword, cfg.KafkaCACert)
 		kafkaConsumer.Start()
 		log.Println("📡 Kafka WS Consumer запущен: читает с FirstOffset, GroupID=kitchen-ws-group-v3")
 		defer kafkaConsumer.Stop()
 	} else {
-		log.Println("⚠️ Kafka WS Consumer НЕ запущен: KafkaBrokers или Redis не настроены")
+		if cfg.KafkaBrokers == "" {
+			log.Println("⚠️ Kafka WS Consumer НЕ запущен: KAFKA_BROKERS не установлен (используется значение по умолчанию localhost:9092)")
+		} else {
+			log.Println("⚠️ Kafka WS Consumer НЕ запущен: Redis не настроен")
+		}
 	}
 
 	// Магазин "Пицца Тест" - создание заказов
@@ -475,7 +487,7 @@ func main() {
 	
 		grpcServer := grpc.NewServer()
 		// Регистрируем наш сервис с Kafka интеграцией
-		grpcOrderServer := api.NewOrderGRPCServer(redisUtil, cfg.KafkaBrokers, cfg.BusinessOpenHour, cfg.BusinessCloseHour, cfg.BusinessCloseMin)
+		grpcOrderServer := api.NewOrderGRPCServer(redisUtil, cfg.KafkaBrokers, cfg.BusinessOpenHour, cfg.BusinessCloseHour, cfg.BusinessCloseMin, cfg.KafkaUsername, cfg.KafkaPassword, cfg.KafkaCACert)
 		pb.RegisterOrderServiceServer(grpcServer, grpcOrderServer)
 	
 		log.Printf("📡 gRPC Server starting on port 50051")

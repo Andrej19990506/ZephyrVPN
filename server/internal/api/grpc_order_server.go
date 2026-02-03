@@ -26,16 +26,24 @@ type OrderGRPCServer struct {
 	kafkaSentCount int64 // Счетчик отправленных сообщений
 }
 
-func NewOrderGRPCServer(redisUtil *utils.RedisClient, kafkaBrokers string, openHour, closeHour, closeMin int) *OrderGRPCServer {
+func NewOrderGRPCServer(redisUtil *utils.RedisClient, kafkaBrokers string, openHour, closeHour, closeMin int, username, password, caCert string) *OrderGRPCServer {
 	var kafkaWriter *kafka.Writer
 	if kafkaBrokers != "" {
+		// Создаем dialer с SASL/PLAIN и TLS если нужно
+		dialer := CreateKafkaDialer(username, password, caCert)
+		
 		// Создаем Kafka writer для отправки Protobuf сообщений
-		brokers := strings.Split(kafkaBrokers, ",")
+		brokers := ParseKafkaBrokers(kafkaBrokers)
 		kafkaWriter = &kafka.Writer{
 			Addr:     kafka.TCP(brokers...),
 			Topic:    "pizza-orders", // Топик для заказов (бинарный Protobuf)
 			Balancer: &kafka.LeastBytes{}, // Балансировка по наименьшему количеству байт
 			Async:    true, // Асинхронная отправка для максимальной скорости
+			Transport: &kafka.Transport{
+				SASL: dialer.SASLMechanism,
+				TLS:  dialer.TLS,
+				Dial: dialer.DialFunc,
+			},
 		}
 		log.Printf("✅ Kafka producer подключен к %s", kafkaBrokers)
 	}
