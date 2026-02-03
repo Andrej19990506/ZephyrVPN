@@ -268,14 +268,16 @@ func main() {
 	log.Println("🖥️ WebSocket Hub запущен для ERP системы")
 	
 	// Запускаем Kafka Consumer для отправки заказов в WebSocket
-	if cfg.KafkaBrokers != "" && redisUtil != nil {
+	// Проверяем, установлена ли переменная окружения (не дефолтное значение)
+	kafkaBrokersEnv := os.Getenv("KAFKA_BROKERS")
+	if kafkaBrokersEnv != "" && cfg.KafkaBrokers != "localhost:9092" && redisUtil != nil {
 		log.Printf("📡 Kafka WS Consumer: используем брокеры: %s", cfg.KafkaBrokers)
 		kafkaConsumer := api.NewKafkaWSConsumer(cfg.KafkaBrokers, "pizza-orders", redisUtil, cfg.KafkaUsername, cfg.KafkaPassword, cfg.KafkaCACert)
 		kafkaConsumer.Start()
 		log.Println("📡 Kafka WS Consumer запущен: читает с FirstOffset, GroupID=kitchen-ws-group-v3")
 		defer kafkaConsumer.Stop()
 	} else {
-		if cfg.KafkaBrokers == "" {
+		if kafkaBrokersEnv == "" || cfg.KafkaBrokers == "localhost:9092" {
 			log.Println("⚠️ Kafka WS Consumer НЕ запущен: KAFKA_BROKERS не установлен (используется значение по умолчанию localhost:9092)")
 		} else {
 			log.Println("⚠️ Kafka WS Consumer НЕ запущен: Redis не настроен")
