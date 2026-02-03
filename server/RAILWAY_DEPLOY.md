@@ -70,9 +70,49 @@ Railway автоматически устанавливает переменну
 
 После успешного деплоя:
 
-1. Railway предоставит публичный URL (например: `https://your-app.railway.app`)
-2. API будет доступен по адресу: `https://your-app.railway.app/api/v1`
-3. Проверьте здоровье сервера: `https://your-app.railway.app/api/v1/health` (если есть)
+1. **Найдите публичный URL:**
+   
+   **Способ 1: Через Settings (рекомендуется)**
+   - Откройте ваш сервис в Railway Dashboard
+   - В правой панели нажмите **"Settings"**
+   - Прокрутите до раздела **"Networking"** или **"Domains"**
+   - Найдите **"Public Networking"** и включите его (если выключен)
+   - Railway автоматически создаст домен вида: `https://your-service-name.up.railway.app`
+   - Скопируйте этот URL
+   
+   **Способ 2: Через Deployments**
+   - Откройте вкладку **"Deployments"**
+   - В последнем успешном деплое будет показан URL сервиса
+   
+   **Способ 3: В верхней части карточки сервиса**
+   - Иногда Railway показывает URL прямо в карточке сервиса
+   - Или кнопку **"Generate Domain"** для создания домена
+
+2. **API будет доступен по адресу:**
+   - Основной API: `https://your-service-name.up.railway.app/api/v1`
+   - Health check: `https://your-service-name.up.railway.app/api/v1/health`
+   - WebSocket: `wss://your-service-name.up.railway.app/api/v1/ws`
+   - gRPC: `your-service-name.up.railway.app:50051` (если настроен)
+
+3. **Проверьте здоровье сервера:**
+   ```bash
+   curl https://your-service-name.up.railway.app/api/v1/health
+   ```
+   
+   Ожидаемый ответ:
+   ```json
+   {
+     "status": "ok",
+     "service": "ERP Server",
+     "version": "1.0.0"
+   }
+   ```
+
+4. **Настройка custom domain (опционально):**
+   - В разделе **"Settings"** → **"Networking"** → **"Custom Domain"**
+   - Добавьте свой домен (например: `api.yourdomain.com`)
+   - Railway автоматически настроит SSL сертификат
+   - Обновите DNS записи согласно инструкциям Railway
 
 ## Миграции базы данных
 

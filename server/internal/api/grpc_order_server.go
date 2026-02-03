@@ -46,6 +46,8 @@ func NewOrderGRPCServer(redisUtil *utils.RedisClient, kafkaBrokers string, openH
 			},
 		}
 		log.Printf("✅ Kafka producer подключен к %s", kafkaBrokers)
+	} else {
+		log.Println("⚠️ Kafka producer НЕ создан: KAFKA_BROKERS не установлен")
 	}
 
 	slotService := services.NewSlotService(redisUtil, openHour, closeHour, closeMin)

@@ -84,7 +84,7 @@ func Load() *Config {
 	return &Config{
 		DatabaseURL:      databaseURL,
 		RedisURL:         redisURL,
-		KafkaBrokers:     getEnv("KAFKA_BROKERS", "localhost:9092"),
+		KafkaBrokers:     getEnv("KAFKA_BROKERS", ""),
 		KafkaUsername:    getEnv("KAFKA_USERNAME", ""),
 		KafkaPassword:    getEnv("KAFKA_PASSWORD", ""),
 		KafkaCACert:       getEnv("KAFKA_CA_CERT", ""),
