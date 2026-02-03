@@ -32,7 +32,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o main ./main.go
 
 FROM alpine:latest
 # Устанавливаем ca-certificates для HTTPS запросов
-RUN apk --no-cache add ca-certificates
-COPY --from=builder /app/main /main
+RUN apk --no-cache add ca-certificates tzdata
+WORKDIR /app
+COPY --from=builder /app/main /app/main
+# Railway автоматически устанавливает PORT, но оставляем 8080 как fallback
 EXPOSE 8080
-ENTRYPOINT ["/main"]
+# Используем exec form для правильной обработки сигналов
+ENTRYPOINT ["/app/main"]

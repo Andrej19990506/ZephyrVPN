@@ -1,0 +1,41 @@
+# Railway ignore file
+# Файлы и папки, которые не нужно загружать на Railway
+
+# Frontend файлы (если они не нужны для бэкенда)
+frontend/
+*.html
+
+# Тестовые файлы
+*_test.go
+load_test.go
+bomb.go
+grpc_load_bomb.go
+
+# Документация
+*.md
+!README.md
+
+# Docker compose файлы (не нужны на Railway)
+docker-compose.yml
+docker-compose.wireguard.yml
+
+# Скрипты (если не нужны в продакшене)
+scripts/
+!scripts/add_branch_vilskogo.go
+
+# Временные файлы
+*.log
+*.tmp
+.env
+.env.local
+
+# IDE файлы
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+

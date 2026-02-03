@@ -179,6 +179,15 @@ func main() {
 	// Создаем пустой движок без лишних прослоек
 	r := gin.New()
 
+	// Health check endpoint (должен быть до CORS для Railway)
+	r.GET("/api/v1/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "ok",
+			"service": "ERP Server",
+			"version": "1.0.0",
+		})
+	})
+
 	// CORS для фронтенда
 	r.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
