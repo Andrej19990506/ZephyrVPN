@@ -5,6 +5,7 @@ import (
 	"net"          // Оставляем один net
 	"net/http"     // Оставляем net/http
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,10 +24,28 @@ func main() {
 	// Загрузка конфигурации
 	cfg := config.Load()
 
+	// Логируем наличие DATABASE_URL (без пароля)
+	if cfg.DatabaseURL != "" {
+		safeURL := cfg.DatabaseURL
+		if idx := strings.Index(safeURL, "@"); idx > 0 {
+			if schemeIdx := strings.Index(safeURL, "://"); schemeIdx > 0 {
+				safeURL = safeURL[:schemeIdx+3] + "***@" + safeURL[idx+1:]
+			}
+		}
+		log.Printf("📋 DATABASE_URL установлен: %s", safeURL)
+	} else {
+		log.Printf("⚠️ DATABASE_URL не установлен, используется значение по умолчанию")
+	}
+
 	// Подключение к PostgreSQL
 	db, err := database.ConnectPostgres(cfg.DatabaseURL)
 	if err != nil {
-		log.Printf("⚠️ PostgreSQL connection failed: %v (continuing without DB)", err)
+		log.Printf("❌ PostgreSQL connection failed: %v", err)
+		log.Printf("⚠️ Продолжаем без БД (ограниченная функциональность)")
+		log.Printf("💡 Убедитесь, что:")
+		log.Printf("   1. PostgreSQL сервис добавлен в Railway")
+		log.Printf("   2. Переменная DATABASE_URL установлена автоматически")
+		log.Printf("   3. Сервисы связаны в Railway Dashboard")
 		db = nil
 	} else {
 		defer database.ClosePostgres(db)

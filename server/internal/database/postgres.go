@@ -3,6 +3,7 @@ package database
 import (
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"gorm.io/driver/postgres"
@@ -12,11 +13,34 @@ import (
 
 var DB *gorm.DB
 
+// normalizeDatabaseURL нормализует DATABASE_URL для GORM
+// Railway предоставляет postgresql://, но GORM ожидает postgres://
+func normalizeDatabaseURL(url string) string {
+	// Заменяем postgresql:// на postgres:// для совместимости с GORM
+	if strings.HasPrefix(url, "postgresql://") {
+		url = strings.Replace(url, "postgresql://", "postgres://", 1)
+		log.Printf("🔧 Нормализован DATABASE_URL: postgresql:// → postgres://")
+	}
+	return url
+}
+
 // ConnectPostgres подключается к PostgreSQL и возвращает *gorm.DB
 func ConnectPostgres(databaseURL string) (*gorm.DB, error) {
 	if databaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is empty")
 	}
+
+	// Нормализуем URL для GORM (Railway использует postgresql://, GORM ожидает postgres://)
+	normalizedURL := normalizeDatabaseURL(databaseURL)
+	
+	// Логируем подключение (без пароля)
+	safeURL := normalizedURL
+	if idx := strings.Index(safeURL, "@"); idx > 0 {
+		if schemeIdx := strings.Index(safeURL, "://"); schemeIdx > 0 {
+			safeURL = safeURL[:schemeIdx+3] + "***@" + safeURL[idx+1:]
+		}
+	}
+	log.Printf("🔄 Подключение к PostgreSQL: %s", safeURL)
 
 	// Настройки GORM для production
 	config := &gorm.Config{
@@ -26,7 +50,7 @@ func ConnectPostgres(databaseURL string) (*gorm.DB, error) {
 		},
 	}
 
-	db, err := gorm.Open(postgres.Open(databaseURL), config)
+	db, err := gorm.Open(postgres.Open(normalizedURL), config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
