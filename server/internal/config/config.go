@@ -21,9 +21,32 @@ type Config struct {
 }
 
 func Load() *Config {
+	// Railway может использовать разные имена переменных для PostgreSQL
+	// Проверяем в порядке приоритета: DATABASE_URL, POSTGRES_URL, PGDATABASE_URL
+	databaseURL := getEnv("DATABASE_URL", "")
+	if databaseURL == "" {
+		databaseURL = getEnv("POSTGRES_URL", "")
+	}
+	if databaseURL == "" {
+		databaseURL = getEnv("PGDATABASE_URL", "")
+	}
+	if databaseURL == "" {
+		databaseURL = "postgres://user:password@localhost/zephyrvpn?sslmode=disable" // Fallback
+	}
+
+	// Railway может использовать разные имена переменных для Redis
+	// Проверяем в порядке приоритета: REDIS_URL, REDISCLOUD_URL
+	redisURL := getEnv("REDIS_URL", "")
+	if redisURL == "" {
+		redisURL = getEnv("REDISCLOUD_URL", "")
+	}
+	if redisURL == "" {
+		redisURL = "redis://localhost:6379/0" // Fallback
+	}
+
 	return &Config{
-		DatabaseURL:      getEnv("DATABASE_URL", "postgres://user:password@localhost/zephyrvpn?sslmode=disable"),
-		RedisURL:         getEnv("REDIS_URL", "redis://localhost:6379/0"),
+		DatabaseURL:      databaseURL,
+		RedisURL:         redisURL,
 		KafkaBrokers:     getEnv("KAFKA_BROKERS", "localhost:9092"),
 		JWTSecret:        getEnv("JWT_SECRET", "your-secret-key-change-in-production"),
 		ServerPort:       getEnv("PORT", "8080"),
