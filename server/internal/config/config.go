@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 )
@@ -22,7 +23,7 @@ type Config struct {
 
 func Load() *Config {
 	// Railway может использовать разные имена переменных для PostgreSQL
-	// Проверяем в порядке приоритета: DATABASE_URL, POSTGRES_URL, PGDATABASE_URL
+	// Проверяем в порядке приоритета: DATABASE_URL, POSTGRES_URL, PGDATABASE_URL, PGHOST (сборка из частей)
 	databaseURL := getEnv("DATABASE_URL", "")
 	if databaseURL == "" {
 		databaseURL = getEnv("POSTGRES_URL", "")
@@ -30,15 +31,48 @@ func Load() *Config {
 	if databaseURL == "" {
 		databaseURL = getEnv("PGDATABASE_URL", "")
 	}
+	// Если нет полного URL, пытаемся собрать из отдельных переменных (Railway иногда так делает)
+	if databaseURL == "" {
+		pgHost := getEnv("PGHOST", "")
+		pgPort := getEnv("PGPORT", "5432")
+		pgUser := getEnv("PGUSER", "postgres")
+		pgPassword := getEnv("PGPASSWORD", "")
+		pgDatabase := getEnv("PGDATABASE", "zephyrvpn")
+		
+		if pgHost != "" {
+			if pgPassword != "" {
+				databaseURL = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
+					pgUser, pgPassword, pgHost, pgPort, pgDatabase)
+			} else {
+				databaseURL = fmt.Sprintf("postgres://%s@%s:%s/%s?sslmode=disable",
+					pgUser, pgHost, pgPort, pgDatabase)
+			}
+		}
+	}
 	if databaseURL == "" {
 		databaseURL = "postgres://user:password@localhost/zephyrvpn?sslmode=disable" // Fallback
 	}
 
 	// Railway может использовать разные имена переменных для Redis
-	// Проверяем в порядке приоритета: REDIS_URL, REDISCLOUD_URL
+	// Проверяем в порядке приоритета: REDIS_URL, REDISCLOUD_URL, REDISHOST (сборка из частей)
 	redisURL := getEnv("REDIS_URL", "")
 	if redisURL == "" {
 		redisURL = getEnv("REDISCLOUD_URL", "")
+	}
+	// Если нет полного URL, пытаемся собрать из отдельных переменных
+	if redisURL == "" {
+		redisHost := getEnv("REDISHOST", "")
+		redisPort := getEnv("REDISPORT", "6379")
+		redisPassword := getEnv("REDISPASSWORD", "")
+		redisDB := getEnv("REDISDB", "0")
+		
+		if redisHost != "" {
+			if redisPassword != "" {
+				redisURL = fmt.Sprintf("redis://:%s@%s:%s/%s", redisPassword, redisHost, redisPort, redisDB)
+			} else {
+				redisURL = fmt.Sprintf("redis://%s:%s/%s", redisHost, redisPort, redisDB)
+			}
+		}
 	}
 	if redisURL == "" {
 		redisURL = "redis://localhost:6379/0" // Fallback

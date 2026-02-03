@@ -30,6 +30,12 @@ func ConnectPostgres(databaseURL string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("DATABASE_URL is empty")
 	}
 
+	// Проверяем, не указывает ли URL на localhost (что может быть проблемой в Railway)
+	if strings.Contains(databaseURL, "@localhost") || strings.Contains(databaseURL, "@127.0.0.1") {
+		log.Printf("⚠️ ВНИМАНИЕ: DATABASE_URL указывает на localhost. В Railway это должно указывать на сервис PostgreSQL.")
+		log.Printf("💡 Убедитесь, что PostgreSQL сервис добавлен и связан в Railway Dashboard")
+	}
+
 	// Нормализуем URL для GORM (Railway использует postgresql://, GORM ожидает postgres://)
 	normalizedURL := normalizeDatabaseURL(databaseURL)
 	

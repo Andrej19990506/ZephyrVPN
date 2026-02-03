@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -17,40 +18,69 @@ func ConnectRedis(redisURL string) (*redis.Client, error) {
 		return nil, fmt.Errorf("REDIS_URL is empty")
 	}
 
-	// Парсим Redis URL
-	// Формат: redis://[password@]host:port[/db] или redis://host:port[/db]
-	// go-redis ожидает только host:port, пароль и DB нужно извлечь отдельно
-	var addr string
-	var password string
-	var db int
-
-	// Если это полный URL (redis://...)
-	if len(redisURL) > 7 && redisURL[:7] == "redis://" {
-		// Убираем префикс redis://
-		urlWithoutScheme := redisURL[7:]
+	// Если это просто host:port (без схемы), используем как есть
+	if !strings.Contains(redisURL, "://") {
+		log.Printf("🔄 Подключение к Redis: %s (простой адрес)", redisURL)
+		client := redis.NewClient(&redis.Options{
+			Addr:         redisURL,
+			PoolSize:     1000,
+			MinIdleConns: 50,
+			MaxRetries:   3,
+		})
 		
-		// Проверяем наличие пароля
-		if atIdx := strings.Index(urlWithoutScheme, "@"); atIdx > 0 {
-			password = urlWithoutScheme[:atIdx]
-			urlWithoutScheme = urlWithoutScheme[atIdx+1:]
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		
+		if err := client.Ping(ctx).Err(); err != nil {
+			return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 		}
 		
-		// Проверяем наличие DB номера
-		if slashIdx := strings.Index(urlWithoutScheme, "/"); slashIdx > 0 {
-			dbStr := urlWithoutScheme[slashIdx+1:]
-			if dbNum, err := strconv.Atoi(dbStr); err == nil {
-				db = dbNum
-			}
-			urlWithoutScheme = urlWithoutScheme[:slashIdx]
-		}
-		
-		addr = urlWithoutScheme
-	} else {
-		// Если это просто host:port
-		addr = redisURL
+		log.Println("✅ Redis connected successfully")
+		return client, nil
 	}
 
-	log.Printf("🔄 Подключение к Redis: %s (DB: %d)", addr, db)
+	// Парсим URL используя стандартный парсер Go
+	parsedURL, err := url.Parse(redisURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Redis URL: %w", err)
+	}
+
+	// Извлекаем компоненты
+	addr := parsedURL.Host
+	if parsedURL.Port() == "" {
+		// Если порт не указан, используем стандартный для Redis
+		if parsedURL.Scheme == "rediss" {
+			addr = parsedURL.Hostname() + ":6380" // TLS порт по умолчанию
+		} else {
+			addr = parsedURL.Hostname() + ":6379" // Стандартный порт Redis
+		}
+	}
+
+	// Пароль из UserInfo
+	password, _ := parsedURL.User.Password()
+	
+	// DB номер из пути (например, /0, /1)
+	db := 0
+	if parsedURL.Path != "" && len(parsedURL.Path) > 1 {
+		if dbNum, err := strconv.Atoi(parsedURL.Path[1:]); err == nil {
+			db = dbNum
+		}
+	}
+
+	// Логируем безопасную версию (без пароля)
+	safeURL := redisURL
+	if password != "" {
+		if parsedURL.User != nil {
+			username := parsedURL.User.Username()
+			safeURL = strings.Replace(redisURL, password, "***", 1)
+			if username != "" {
+				// Заменяем username:password на username:***
+				safeURL = strings.Replace(safeURL, username+":"+password, username+":***", 1)
+			}
+		}
+	}
+	log.Printf("🔄 Подключение к Redis: %s", safeURL)
+	log.Printf("   📍 Адрес: %s, DB: %d", addr, db)
 
 	client := redis.NewClient(&redis.Options{
 		Addr:         addr,
