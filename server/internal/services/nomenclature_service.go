@@ -23,12 +23,19 @@ import (
 type NomenclatureService struct {
 	db         *gorm.DB
 	pluService *PLUService // Для генерации SKU на основе PLU
+	uomService *UoMConversionService // Для получения правил конвертации
 }
 
 func NewNomenclatureService(db *gorm.DB) *NomenclatureService {
 	return &NomenclatureService{
-		db: db,
+		db:         db,
+		uomService: NewUoMConversionService(db), // Инициализируем сервис правил конвертации
 	}
+}
+
+// SetUoMService устанавливает сервис правил конвертации (для тестирования или внешней инициализации)
+func (ns *NomenclatureService) SetUoMService(uomService *UoMConversionService) {
+	ns.uomService = uomService
 }
 
 // SetPLUService устанавливает PLU сервис для генерации SKU
@@ -86,6 +93,46 @@ func (ns *NomenclatureService) CreateItem(item *models.NomenclatureItem) error {
 		}
 	}
 	
+	// КРИТИЧЕСКИ ВАЖНО: Валидация и исправление конфликтов единиц измерения
+	// BaseUnit должен быть минимальной единицей (г/мл), а не крупной (кг/л) для правильной работы формул расчета стоимости
+	ns.validateAndFixUnitSettings(item)
+	
+	// ВАЖНО: Автоматически определяем conversion_factor из правил конвертации
+	// Если conversion_factor не указан (0) или равен 1 (значение по умолчанию), пытаемся найти правило конвертации
+	// Это нужно, чтобы автоматически подтягивать правила из "Отдела закупок" -> "Правила Конвертации"
+	if item.ConversionFactor == 0 || item.ConversionFactor == 1 {
+		if ns.uomService != nil {
+			conversionFactor := ns.findConversionFactorFromRules(item.InboundUnit, item.BaseUnit)
+			if conversionFactor > 0 {
+				item.ConversionFactor = conversionFactor
+				log.Printf("✅ Автоматически установлен conversion_factor = %.2f для товара '%s' (InboundUnit: %s, BaseUnit: %s) из правил конвертации",
+					conversionFactor, item.Name, item.InboundUnit, item.BaseUnit)
+			} else {
+				// Если правило не найдено, вычисляем conversion_factor на основе единиц
+				calculatedFactor := ns.calculateConversionFactor(item.InboundUnit, item.BaseUnit)
+				if calculatedFactor > 0 {
+					item.ConversionFactor = calculatedFactor
+					log.Printf("✅ Автоматически вычислен conversion_factor = %.2f для товара '%s' (InboundUnit: %s, BaseUnit: %s)",
+						calculatedFactor, item.Name, item.InboundUnit, item.BaseUnit)
+				} else {
+					log.Printf("⚠️ Правило конвертации не найдено для товара '%s' (InboundUnit: %s, BaseUnit: %s), используется значение по умолчанию: %.2f",
+						item.Name, item.InboundUnit, item.BaseUnit, item.ConversionFactor)
+				}
+			}
+		} else {
+			log.Printf("⚠️ UoMConversionService не инициализирован для товара '%s'", item.Name)
+		}
+	} else {
+		// Проверяем, что установленный вручную conversion_factor соответствует единицам
+		expectedFactor := ns.calculateConversionFactor(item.InboundUnit, item.BaseUnit)
+		if expectedFactor > 0 && item.ConversionFactor != expectedFactor {
+			log.Printf("⚠️ ВНИМАНИЕ: conversion_factor = %.2f не соответствует единицам для товара '%s' (InboundUnit: %s, BaseUnit: %s). Ожидается: %.2f",
+				item.ConversionFactor, item.Name, item.InboundUnit, item.BaseUnit, expectedFactor)
+		}
+		log.Printf("ℹ️ conversion_factor = %.2f установлен вручную для товара '%s', правила конвертации не применяются",
+			item.ConversionFactor, item.Name)
+	}
+	
 	return ns.db.Create(item).Error
 }
 
@@ -114,8 +161,177 @@ func (ns *NomenclatureService) UpdateItem(id string, item *models.NomenclatureIt
 		}
 	}
 	
+	// КРИТИЧЕСКИ ВАЖНО: Валидация и исправление конфликтов единиц измерения
+	// BaseUnit должен быть минимальной единицей (г/мл), а не крупной (кг/л) для правильной работы формул расчета стоимости
+	ns.validateAndFixUnitSettings(item)
+	
+	// ВАЖНО: Автоматически определяем conversion_factor из правил конвертации
+	// Если conversion_factor не указан (0) или равен 1 (значение по умолчанию), или изменились InboundUnit/BaseUnit, пытаемся найти правило
+	// Это нужно, чтобы автоматически подтягивать правила из "Отдела закупок" -> "Правила Конвертации"
+	if (item.ConversionFactor == 0 || item.ConversionFactor == 1) || 
+	   (item.InboundUnit != existing.InboundUnit || item.BaseUnit != existing.BaseUnit) {
+		if ns.uomService != nil {
+			conversionFactor := ns.findConversionFactorFromRules(item.InboundUnit, item.BaseUnit)
+			if conversionFactor > 0 {
+				item.ConversionFactor = conversionFactor
+				log.Printf("✅ Автоматически обновлен conversion_factor = %.2f для товара '%s' (InboundUnit: %s, BaseUnit: %s) из правил конвертации",
+					conversionFactor, item.Name, item.InboundUnit, item.BaseUnit)
+			} else {
+				// Если правило не найдено, вычисляем conversion_factor на основе единиц
+				calculatedFactor := ns.calculateConversionFactor(item.InboundUnit, item.BaseUnit)
+				if calculatedFactor > 0 {
+					item.ConversionFactor = calculatedFactor
+					log.Printf("✅ Автоматически вычислен conversion_factor = %.2f для товара '%s' (InboundUnit: %s, BaseUnit: %s)",
+						calculatedFactor, item.Name, item.InboundUnit, item.BaseUnit)
+				} else {
+					log.Printf("⚠️ Правило конвертации не найдено для товара '%s' (InboundUnit: %s, BaseUnit: %s), используется значение: %.2f",
+						item.Name, item.InboundUnit, item.BaseUnit, item.ConversionFactor)
+				}
+			}
+		} else {
+			log.Printf("⚠️ UoMConversionService не инициализирован для товара '%s'", item.Name)
+		}
+	} else {
+		// Проверяем, что установленный вручную conversion_factor соответствует единицам
+		expectedFactor := ns.calculateConversionFactor(item.InboundUnit, item.BaseUnit)
+		if expectedFactor > 0 && item.ConversionFactor != expectedFactor {
+			log.Printf("⚠️ ВНИМАНИЕ: conversion_factor = %.2f не соответствует единицам для товара '%s' (InboundUnit: %s, BaseUnit: %s). Ожидается: %.2f",
+				item.ConversionFactor, item.Name, item.InboundUnit, item.BaseUnit, expectedFactor)
+		}
+	}
+	
 	item.ID = id
 	return ns.db.Model(&existing).Updates(item).Error
+}
+
+// validateAndFixUnitSettings валидирует и исправляет конфликты единиц измерения
+// КРИТИЧЕСКИ ВАЖНО: BaseUnit должен быть минимальной единицей (г/мл), а не крупной (кг/л)
+// для правильной работы формул расчета стоимости в stock_service.go
+func (ns *NomenclatureService) validateAndFixUnitSettings(item *models.NomenclatureItem) {
+	baseUnitNormalized := strings.ToLower(strings.TrimSpace(item.BaseUnit))
+	inboundUnitNormalized := strings.ToLower(strings.TrimSpace(item.InboundUnit))
+	
+	// Исправляем BaseUnit: если установлен "кг" или "л", меняем на "г" или "мл"
+	if baseUnitNormalized == "кг" || baseUnitNormalized == "kg" {
+		if inboundUnitNormalized == "кг" || inboundUnitNormalized == "kg" {
+			// Если и BaseUnit и InboundUnit = "кг", исправляем BaseUnit на "г"
+			oldBaseUnit := item.BaseUnit
+			item.BaseUnit = "g"
+			log.Printf("⚠️ ВНИМАНИЕ: Исправлен BaseUnit для товара '%s': '%s' -> 'g' (для правильной работы формул расчета стоимости)",
+				item.Name, oldBaseUnit)
+		}
+	} else if baseUnitNormalized == "л" || baseUnitNormalized == "l" {
+		if inboundUnitNormalized == "л" || inboundUnitNormalized == "l" {
+			// Если и BaseUnit и InboundUnit = "л", исправляем BaseUnit на "мл"
+			oldBaseUnit := item.BaseUnit
+			item.BaseUnit = "ml"
+			log.Printf("⚠️ ВНИМАНИЕ: Исправлен BaseUnit для товара '%s': '%s' -> 'ml' (для правильной работы формул расчета стоимости)",
+				item.Name, oldBaseUnit)
+		}
+	}
+	
+	// Проверяем корректность ConversionFactor
+	expectedFactor := ns.calculateConversionFactor(item.InboundUnit, item.BaseUnit)
+	if expectedFactor > 0 {
+		// Если ConversionFactor не соответствует единицам, исправляем
+		if item.ConversionFactor == 0 || item.ConversionFactor == 1 {
+			// Если не установлен, устанавливаем правильное значение
+			item.ConversionFactor = expectedFactor
+		} else if item.ConversionFactor != expectedFactor {
+			// Если установлен неправильно, предупреждаем
+			log.Printf("⚠️ ВНИМАНИЕ: ConversionFactor = %.2f не соответствует единицам для товара '%s' (InboundUnit: %s, BaseUnit: %s). Ожидается: %.2f",
+				item.ConversionFactor, item.Name, item.InboundUnit, item.BaseUnit, expectedFactor)
+			// Автоматически исправляем, если разница значительная
+			if item.ConversionFactor/expectedFactor > 10 || expectedFactor/item.ConversionFactor > 10 {
+				log.Printf("⚠️ Автоматически исправлен ConversionFactor для товара '%s': %.2f -> %.2f",
+					item.Name, item.ConversionFactor, expectedFactor)
+				item.ConversionFactor = expectedFactor
+			}
+		}
+	}
+}
+
+// calculateConversionFactor вычисляет коэффициент конвертации на основе единиц измерения
+func (ns *NomenclatureService) calculateConversionFactor(inboundUnit, baseUnit string) float64 {
+	inboundUnitNormalized := strings.ToLower(strings.TrimSpace(inboundUnit))
+	baseUnitNormalized := strings.ToLower(strings.TrimSpace(baseUnit))
+	
+	// Стандартные конвертации
+	if (inboundUnitNormalized == "кг" || inboundUnitNormalized == "kg") && 
+	   (baseUnitNormalized == "г" || baseUnitNormalized == "g") {
+		return 1000 // 1 кг = 1000 г
+	}
+	if (inboundUnitNormalized == "л" || inboundUnitNormalized == "l") && 
+	   (baseUnitNormalized == "мл" || baseUnitNormalized == "ml") {
+		return 1000 // 1 л = 1000 мл
+	}
+	if (inboundUnitNormalized == "г" || inboundUnitNormalized == "g") && 
+	   (baseUnitNormalized == "кг" || baseUnitNormalized == "kg") {
+		return 0.001 // 1 г = 0.001 кг (обратная конвертация)
+	}
+	if (inboundUnitNormalized == "мл" || inboundUnitNormalized == "ml") && 
+	   (baseUnitNormalized == "л" || baseUnitNormalized == "l") {
+		return 0.001 // 1 мл = 0.001 л (обратная конвертация)
+	}
+	
+	// Если единицы совпадают, коэффициент = 1
+	if inboundUnitNormalized == baseUnitNormalized {
+		return 1
+	}
+	
+	// Если единицы не совпадают, но нет стандартной конвертации, возвращаем 0
+	// (будет использовано значение из правил конвертации или вручную установленное)
+	return 0
+}
+
+// findConversionFactorFromRules находит коэффициент конвертации из правил конвертации
+// Просто загружает правила из БД и ищет подходящее
+func (ns *NomenclatureService) findConversionFactorFromRules(inboundUnit, baseUnit string) float64 {
+	// Загружаем правила напрямую из БД
+	var rules []models.UoMConversionRule
+	if err := ns.db.Where("deleted_at IS NULL AND is_active = ?", true).
+		Order("is_default DESC, name ASC").
+		Find(&rules).Error; err != nil {
+		log.Printf("⚠️ Ошибка загрузки правил конвертации из БД: %v", err)
+		return 0
+	}
+	
+	if len(rules) == 0 {
+		log.Printf("⚠️ Правила конвертации не найдены в БД")
+		return 0
+	}
+	
+	// Нормализуем единицы для сравнения
+	inboundUnitLower := strings.ToLower(strings.TrimSpace(inboundUnit))
+	baseUnitLower := strings.ToLower(strings.TrimSpace(baseUnit))
+	
+	// Ищем правило, где InputUOM = InboundUnit и BaseUnit = BaseUnit
+	for _, rule := range rules {
+		ruleInputUOM := strings.ToLower(strings.TrimSpace(rule.InputUOM))
+		ruleBaseUnit := strings.ToLower(strings.TrimSpace(rule.BaseUnit))
+		
+		// Проверяем соответствие (с учетом вариантов написания)
+		if (ruleInputUOM == inboundUnitLower || 
+			(ruleInputUOM == "кг" && inboundUnitLower == "kg") ||
+			(ruleInputUOM == "kg" && inboundUnitLower == "кг") ||
+			(ruleInputUOM == "л" && inboundUnitLower == "l") ||
+			(ruleInputUOM == "l" && inboundUnitLower == "л")) &&
+			ruleBaseUnit == baseUnitLower {
+			log.Printf("✅ Найдено правило: '%s' (%s -> %s, multiplier: %.2f)",
+				rule.Name, rule.InputUOM, rule.BaseUnit, rule.Multiplier)
+			return rule.Multiplier
+		}
+	}
+	
+	// Стандартные конвертации, если правило не найдено
+	if (inboundUnitLower == "kg" || inboundUnitLower == "кг") && baseUnitLower == "g" {
+		return 1000.0
+	}
+	if (inboundUnitLower == "l" || inboundUnitLower == "л") && baseUnitLower == "ml" {
+		return 1000.0
+	}
+	
+	return 0
 }
 
 // DeleteItem удаляет товар (soft delete)
@@ -575,10 +791,14 @@ func (ns *NomenclatureService) ProcessImport(items []map[string]interface{}, fie
 	return result, nil
 }
 
-// GetAllCategories возвращает все категории
+// GetAllCategories возвращает все категории, включая пустые (без товаров)
+// ВАЖНО: Метод возвращает ВСЕ категории, независимо от наличия в них товаров
+// Это позволяет отделу закупок видеть все категории, даже если они еще пустые
 func (ns *NomenclatureService) GetAllCategories() ([]models.NomenclatureCategory, error) {
 	var categories []models.NomenclatureCategory
-	if err := ns.db.Where("deleted_at IS NULL").Find(&categories).Error; err != nil {
+	// Загружаем все категории без фильтрации по наличию товаров
+	// Не используем JOIN с nomenclature_items, чтобы не отфильтровать пустые категории
+	if err := ns.db.Where("deleted_at IS NULL").Order("name ASC").Find(&categories).Error; err != nil {
 		return nil, err
 	}
 	return categories, nil

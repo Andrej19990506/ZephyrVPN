@@ -15,14 +15,17 @@ type NomenclatureItem struct {
 	CategoryID       *string        `json:"category_id" gorm:"type:uuid;index"`
 	CategoryName     string         `json:"category_name" gorm:"type:varchar(100)"`
 	CategoryColor    string         `json:"category_color" gorm:"type:varchar(7);default:'#10b981'"`
-	BaseUnit         string         `json:"base_unit" gorm:"type:varchar(20);not null;default:'kg'"` // kg, l, pcs, box
-	InboundUnit      string         `json:"inbound_unit" gorm:"type:varchar(20);not null;default:'kg'"`
-	ProductionUnit   string         `json:"production_unit" gorm:"type:varchar(20);not null;default:'g'"`
+	BaseUnit         string         `json:"base_unit" gorm:"type:varchar(20);not null;default:'g'"` // g, ml, pcs, box - базовая единица склада для точного учета
+	InboundUnit      string         `json:"inbound_unit" gorm:"type:varchar(20);not null;default:'kg'"` // kg, l, pcs, box - единица закупки/поступления
+	ProductionUnit   string         `json:"production_unit" gorm:"type:varchar(20);not null;default:'g'"` // g, ml, pcs - единица использования в производстве
 	ConversionFactor float64        `json:"conversion_factor" gorm:"type:decimal(10,2);default:1.0"`
+	UnitWeight       float64        `json:"unit_weight" gorm:"type:decimal(10,4);default:0"` // Вес одной единицы товара в граммах (для pcs, box и т.д.)
 	MinStockLevel    float64        `json:"min_stock_level" gorm:"type:decimal(10,2);default:0"`
 	StorageZone      string         `json:"storage_zone" gorm:"type:varchar(50);default:'dry_storage'"` // fridge, dry_storage, bar, freezer
 	LastPrice        float64        `json:"last_price" gorm:"type:decimal(10,2);default:0"`
 	IsActive         bool           `json:"is_active" gorm:"default:true"`
+	IsSaleable       bool           `json:"is_saleable" gorm:"default:false"` // Флаг: товар для продажи (отображается в меню "Make Order")
+	IsReadyForSale   bool           `json:"is_ready_for_sale" gorm:"default:false"` // Флаг: готов к продаже (есть связанный Recipe с ингредиентами)
 	CreatedAt        time.Time      `json:"created_at" gorm:"autoCreateTime"`
 	UpdatedAt        time.Time      `json:"updated_at" gorm:"autoUpdateTime"`
 	DeletedAt        gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`

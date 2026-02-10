@@ -13,135 +13,17 @@ var (
 	extrasMu sync.RWMutex
 )
 
-// Доступные пиццы
-var AvailablePizzas = map[string]Pizza{
-	"Английский завтрак": {
-		Name:        "Английский завтрак",
-		Price:       599,
-		Ingredients: []string{"сыр моцарелла", "бекон", "яйцо", "помидоры", "лук", "соус"},
-		IngredientAmounts: map[string]int{
-			"сыр моцарелла": 150,
-			"бекон":         80,
-			"яйцо":          100,
-			"помидоры":      120,
-			"лук":           60,
-			"соус":          80,
-		},
-	},
-	"Солянка Злодейская": {
-		Name:        "Солянка Злодейская",
-		Price:       799,
-		Ingredients: []string{"сыр моцарелла", "колбаса", "огурцы маринованные", "оливки", "пепперони", "бекон", "острый перец", "соус"},
-		IngredientAmounts: map[string]int{
-			"сыр моцарелла":     150,
-			"колбаса":           100,
-			"огурцы маринованные": 80,
-			"оливки":            50,
-			"пепперони":         100,
-			"бекон":             80,
-			"острый перец":      30,
-			"соус":              80,
-		},
-	},
-	"Классическая": {
-		Name:        "Классическая",
-		Price:       499,
-		Ingredients: []string{"сыр моцарелла", "помидоры", "базилик", "соус"},
-		IngredientAmounts: map[string]int{
-			"сыр моцарелла": 150,
-			"помидоры":      120,
-			"базилик":       10,
-			"соус":          80,
-		},
-	},
-	"New York": {
-		Name:        "New York",
-		Price:       699,
-		Ingredients: []string{"сыр моцарелла", "пепперони", "грибы", "лук", "соус"},
-		IngredientAmounts: map[string]int{
-			"сыр моцарелла": 150,
-			"пепперони":     100,
-			"грибы":         100,
-			"лук":           60,
-			"соус":          80,
-		},
-	},
-	"Пепперони": {
-		Name:        "Пепперони",
-		Price:       549,
-		Ingredients: []string{"сыр моцарелла", "пепперони", "соус"},
-		IngredientAmounts: map[string]int{
-			"сыр моцарелла": 150,
-			"пепперони":     100,
-			"соус":          80,
-		},
-	},
-	"Мясная": {
-		Name:        "Мясная",
-		Price:       749,
-		Ingredients: []string{"сыр моцарелла", "бекон", "колбаса", "ветчина", "соус"},
-		IngredientAmounts: map[string]int{
-			"сыр моцарелла": 150,
-			"бекон":         80,
-			"колбаса":       100,
-			"ветчина":       80,
-			"соус":          80,
-		},
-	},
-	"Охотничья": {
-		Name:        "Охотничья",
-		Price:       699,
-		Ingredients: []string{"сыр моцарелла", "колбаса охотничья", "грибы", "лук", "соус"},
-		IngredientAmounts: map[string]int{
-			"сыр моцарелла":     150,
-			"колбаса охотничья": 100,
-			"грибы":             100,
-			"лук":               60,
-			"соус":              80,
-		},
-	},
-	"Курица и Грибы": {
-		Name:        "Курица и Грибы",
-		Price:       899,
-		Ingredients: []string{"сыр моцарелла", "курица", "грибы", "соус"},
-		IngredientAmounts: map[string]int{
-			"сыр моцарелла": 150,
-			"курица":        120,
-			"грибы":         100,
-			"соус":          80,
-		},
-	},
-}
+// Доступные пиццы (загружаются динамически из БД через MenuService.LoadMenu())
+// Инициализируется пустой мапой, данные заполняются при старте сервера
+var AvailablePizzas = make(map[string]Pizza)
 
-// Допы
-var AvailableExtras = map[string]Extra{
-	"Сырный бортик": {
-		Name:  "Сырный бортик",
-		Price: 199,
-	},
-}
+// Допы (загружаются динамически из БД через MenuService.LoadMenu())
+// Инициализируется пустой мапой, данные заполняются при старте сервера
+var AvailableExtras = make(map[string]Extra)
 
-// Наборы пицц
-var AvailableSets = map[string]PizzaSet{
-	"Семейный набор": {
-		Name:        "Семейный набор",
-		Description: "2 пиццы на выбор + сырный бортик",
-		Pizzas:      []string{"Классическая", "Пепперони"},
-		Price:       1200, // Скидка от обычной цены
-	},
-	"Мясной набор": {
-		Name:        "Мясной набор",
-		Description: "Мясная + New York + Английский завтрак + Классическая + Курица и Грибы",
-		Pizzas:      []string{"Мясная", "Охотничья"},
-		Price:       1500,
-	},
-	"Пицца-пати": {
-		Name:        "Пицца-пати",
-		Description: "3 пиццы: New York + Солянка Злодейская + Английский завтрак",
-		Pizzas:      []string{"New York", "Солянка Злодейская", "Английский завтрак"},
-		Price:       2000,
-	},
-}
+// Наборы пицц (загружаются динамически из БД через MenuService.LoadMenu())
+// Инициализируется пустой мапой, данные заполняются при старте сервера
+var AvailableSets = make(map[string]PizzaSet)
 
 type PizzaSet struct {
 	Name        string   `json:"name"`
@@ -153,11 +35,13 @@ type PizzaSet struct {
 type Pizza struct {
 	Name              string          `json:"name"`
 	Price             int             `json:"price"` // в рублях
-	Ingredients       []string        `json:"ingredients"`
+	Ingredients       []string        `json:"ingredients"` // Старые ингредиенты из PizzaRecipe (для обратной совместимости)
 	IngredientAmounts map[string]int  `json:"ingredient_amounts"` // Дозировка ингредиентов в граммах
+	IngredientNames   []string        `json:"ingredient_names,omitempty"` // Названия ингредиентов из номенклатуры (только неопциональные)
 }
 
 type Extra struct {
+	ID    uint   `json:"id,omitempty"` // ID из БД
 	Name  string `json:"name"`
 	Price int    `json:"price"` // в рублях
 }
@@ -169,7 +53,9 @@ type PizzaItem struct {
 	Extras      []string `json:"extras,omitempty"` // Допы (сырный бортик и т.д.)
 	ExcludeIngredients []string `json:"exclude_ingredients,omitempty"` // Что НЕ класть (для поваров)
 	Quantity    int      `json:"quantity"`
-	Price       int      `json:"price"`
+	Price       int      `json:"price"` // Общая цена за единицу (пицца + допы)
+	PizzaPrice  int      `json:"pizza_price,omitempty"` // Цена пиццы без допов (за единицу)
+	ExtrasPrice int      `json:"extras_price,omitempty"` // Цена допов (за единицу)
 	SetName     string   `json:"set_name,omitempty"` // Название набора, если это элемент набора
 	IsSetItem   bool     `json:"is_set_item,omitempty"` // Флаг что это элемент набора
 }
@@ -205,6 +91,9 @@ type PizzaOrder struct {
 	TargetSlotID      string    `json:"target_slot_id,omitempty"`     // ID временного слота
 	TargetSlotStartTime time.Time `json:"target_slot_start_time,omitempty"` // Время начала слота (UTC, RFC3339)
 	VisibleAt         time.Time `json:"visible_at,omitempty"`         // Время, когда заказ должен появиться на планшете (UTC, RFC3339)
+	
+	// Станции кухни
+	CanWork           bool      `json:"can_work,omitempty"`           // Виртуальное поле: может ли станция работать с этим заказом
 }
 
 // Потокобезопасные геттеры для чтения меню (критично для Pub/Sub и высоких нагрузок)

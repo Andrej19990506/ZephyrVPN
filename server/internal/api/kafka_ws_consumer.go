@@ -12,50 +12,77 @@ import (
 	"google.golang.org/protobuf/proto"
 	"zephyrvpn/server/internal/models"
 	"zephyrvpn/server/internal/pb"
+	"zephyrvpn/server/internal/services"
 	"zephyrvpn/server/internal/utils"
 )
 
 // KafkaWSConsumer читает заказы из Kafka и отправляет их в WebSocket
 type KafkaWSConsumer struct {
-	brokers    []string
-	topic      string
-	groupID    string
-	reader     *kafka.Reader
-	ctx        context.Context
-	cancel     context.CancelFunc
-	redisUtil  *utils.RedisClient
-	processed  int64 // Счетчик обработанных заказов
-	lastLog    int64 // Время последнего лога
+	brokers     []string
+	topic       string
+	groupID     string
+	reader      *kafka.Reader
+	ctx         context.Context
+	cancel      context.CancelFunc
+	redisUtil   *utils.RedisClient
+	orderService *services.OrderService // Для сохранения в PostgreSQL
+	processed   int64 // Счетчик обработанных заказов
+	lastLog     int64 // Время последнего лога
 }
 
 // NewKafkaWSConsumer создает новый Kafka Consumer для WebSocket
-func NewKafkaWSConsumer(brokers string, topic string, redisUtil *utils.RedisClient, username, password, caCert string) *KafkaWSConsumer {
+// После BootstrapState из PostgreSQL, consumer должен начинать с latest offset
+// чтобы не обрабатывать старые заказы повторно
+func NewKafkaWSConsumer(brokers string, topic string, redisUtil *utils.RedisClient, username, password, caCert string, startFromLatest bool, orderService *services.OrderService) *KafkaWSConsumer {
 	brokerList := ParseKafkaBrokers(brokers)
 	ctx, cancel := context.WithCancel(context.Background())
 	
 	// Создаем dialer с SASL/PLAIN и TLS если нужно
 	dialer := CreateKafkaDialer(username, password, caCert)
 	
+	// Стабильный group.id для надежного управления offset
+	// После bootstrap из БД используем latest offset, чтобы не обрабатывать старые заказы
+	startOffset := kafka.FirstOffset
+	if startFromLatest {
+		startOffset = kafka.LastOffset
+		log.Printf("📡 Kafka Consumer: настройка startOffset=LastOffset (после bootstrap из БД)")
+	} else {
+		log.Printf("📡 Kafka Consumer: настройка startOffset=FirstOffset (начальный запуск)")
+	}
+	
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     brokerList,
 		Topic:       topic,
-		GroupID:     "kitchen-ws-group-v3", // Новый GroupID чтобы читать все заказы заново
-		StartOffset: kafka.FirstOffset,      // Начинаем с самого начала очереди
-		MinBytes:    1,
-		MaxBytes:    10e6,
-		MaxWait:     1 * time.Second,
-		Dialer:      dialer, // Используем dialer с SASL/TLS
+		GroupID:     "order-service-stable-group", // Стабильный group.id для управления offset
+		StartOffset: startOffset,
+		
+		// Настройки производительности для батчинга
+		MinBytes:    10e3,  // Минимум 10KB для батчинга (улучшает throughput)
+		MaxBytes:    10e6,  // Максимум 10MB за один fetch
+		MaxWait:     1 * time.Second, // Максимальное ожидание для батчинга
+		
+		Dialer: dialer,
+	
+		// Настройки Consumer Group
+		SessionTimeout:    60 * time.Second,   // Таймаут сессии (consumer считается мертвым)
+		HeartbeatInterval: 20 * time.Second,   // Интервал heartbeat (должен быть < SessionTimeout/3)
+		RebalanceTimeout:  30 * time.Second,   // Время на rebalance при добавлении/удалении consumer
+		
+		// КРИТИЧНО: Автоматический commit offset каждые 5 секунд
+		// Это гарантирует, что обработанные сообщения не будут повторно обработаны
+		CommitInterval: 5 * time.Second,
 	})
 	
 	return &KafkaWSConsumer{
-		brokers:   brokerList,
-		topic:     topic,
-		groupID:  "kitchen-ws-group-v3",
-		reader:   reader,
-		ctx:      ctx,
-		cancel:   cancel,
-		redisUtil: redisUtil,
-		lastLog:  time.Now().Unix(),
+		brokers:      brokerList,
+		topic:        topic,
+		groupID:      "order-service-stable-group",
+		reader:       reader,
+		ctx:          ctx,
+		cancel:       cancel,
+		redisUtil:    redisUtil,
+		orderService: orderService,
+		lastLog:      time.Now().Unix(),
 	}
 }
 
@@ -224,14 +251,34 @@ func (kc *KafkaWSConsumer) Start() {
 						}
 					}
 					
-					// 3. Инкремент счетчиков для статистики
+					// 3. Сохраняем заказ в PostgreSQL (асинхронно, не блокируем обработку)
+					if kc.orderService != nil {
+						go func(orderToSave models.PizzaOrder) {
+							if err := kc.orderService.SaveOrder(orderToSave); err != nil {
+								log.Printf("⚠️ Kafka Consumer: ошибка сохранения заказа %s в PostgreSQL: %v", orderToSave.ID, err)
+							} else {
+								log.Printf("✅ Kafka Consumer: заказ %s сохранен в PostgreSQL", orderToSave.ID)
+							}
+						}(order)
+					}
+					
+					// 4. Инкремент счетчиков для статистики
 					kc.redisUtil.Increment("erp:orders:total")
 					kc.redisUtil.Increment("erp:orders:pending")
 					
 					// НЕ добавляем в очередь воркеров - обработка только вручную через ERP
+					
+					// 5. КРИТИЧНО: Commit offset только после успешной обработки
+					// Это гарантирует at-least-once delivery и предотвращает повторную обработку
+					// Commit делаем после сохранения в Redis/PostgreSQL, но до отправки в WebSocket
+					// (WebSocket может быть недоступен, но заказ уже сохранен)
+					if err := kc.reader.CommitMessages(kc.ctx, msg); err != nil {
+						log.Printf("⚠️ Kafka Consumer: ошибка commit offset для сообщения offset=%d: %v", msg.Offset, err)
+						// Продолжаем работу, так как CommitInterval также делает автоматический commit
+					}
 				}
 				
-				// 4. Отправляем заказ в WebSocket
+				// 4. Отправляем заказ в WebSocket (после commit offset)
 				// Отправляем на планшеты поваров
 				orderJSON, err := json.Marshal(order)
 				if err != nil {

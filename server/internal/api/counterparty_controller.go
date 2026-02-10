@@ -143,3 +143,108 @@ func (cc *CounterpartyController) DeleteCounterparty(c *gin.Context) {
 	})
 }
 
+// FetchCounterpartyByINN получает контрагента по ИНН
+// GET /api/v1/finance/counterparties/fetch-by-inn?inn=...
+func (cc *CounterpartyController) FetchCounterpartyByINN(c *gin.Context) {
+	inn := c.Query("inn")
+	if inn == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "ИНН не указан",
+		})
+		return
+	}
+
+	counterparty, err := cc.service.GetCounterpartyByINN(inn)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "Контрагент с таким ИНН не найден",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, counterparty)
+}
+
+// CheckINNDuplicate проверяет, существует ли контрагент с таким ИНН
+// GET /api/v1/finance/counterparties/check-inn?inn=...
+func (cc *CounterpartyController) CheckINNDuplicate(c *gin.Context) {
+	inn := c.Query("inn")
+	if inn == "" {
+		c.JSON(http.StatusOK, gin.H{
+			"is_duplicate": false,
+			"message":      "ИНН не указан",
+		})
+		return
+	}
+
+	isDuplicate, err := cc.service.CheckINNDuplicate(inn)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Ошибка проверки ИНН",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"is_duplicate": isDuplicate,
+		"message":      map[bool]string{true: "ИНН уже используется", false: "ИНН свободен"}[isDuplicate],
+	})
+}
+
+// CreateInvoice создает счет для контрагента
+// POST /api/v1/finance/counterparties/invoices
+func (cc *CounterpartyController) CreateInvoice(c *gin.Context) {
+	var req models.Invoice
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Неверные данные",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Валидация обязательных полей
+	if req.Number == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Номер счета обязателен",
+		})
+		return
+	}
+
+	if req.CounterpartyID == nil || *req.CounterpartyID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Контрагент обязателен",
+		})
+		return
+	}
+
+	// Проверяем, существует ли контрагент
+	_, err := cc.service.GetCounterpartyByID(*req.CounterpartyID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Контрагент не найден",
+		})
+		return
+	}
+
+	// Генерируем ID если не указан
+	if req.ID == "" {
+		req.ID = uuid.New().String()
+	}
+
+	// Сохраняем счет в БД через сервис
+	if err := cc.service.CreateInvoice(&req); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Ошибка создания счета",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Возвращаем созданный счет
+	// Фронтенд уже имеет все данные (counterparties, branches) в локальных массивах,
+	// поэтому связанные данные (Preload) не нужны - фронт найдет названия по ID
+	c.JSON(http.StatusCreated, req)
+}
+

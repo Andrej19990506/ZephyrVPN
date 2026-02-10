@@ -40,6 +40,9 @@ message PizzaOrder {
     bool is_set = 5;
     string set_name = 6;
     int32 total_price = 7;
+    int32 discount_amount = 23;    // Сумма скидки в рублях
+    int32 discount_percent = 24;   // Процент скидки
+    int32 final_price = 25;        // Итоговая цена: товары + доставка - скидка (в рублях)
     int64 created_at = 8; // Unix timestamp в наносекундах
     string status = 9;
     string target_slot_id = 15; // ID временного слота (Capacity-Based Slot Scheduling)

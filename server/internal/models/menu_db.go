@@ -34,12 +34,33 @@ type PizzaSetDB struct {
 
 // ExtraDB - таблица допов в БД
 type ExtraDB struct {
-	ID        uint   `gorm:"primaryKey"`
-	Name      string `gorm:"uniqueIndex:name;not null"` // Явное имя индекса
-	Price     int    `gorm:"not null"` // в рублях
-	IsActive  bool   `gorm:"default:true"`
+	ID                uint    `gorm:"primaryKey" json:"id"`
+	Name              string  `gorm:"uniqueIndex:name;not null" json:"name"` // Явное имя индекса
+	Price             int     `gorm:"not null" json:"price"` // в рублях
+	PortionWeightGrams int    `gorm:"default:50;not null" json:"portion_weight_grams"` // Вес порции допа в граммах (best practice: точное списание)
+	NomenclatureID    *string `gorm:"type:uuid;index" json:"nomenclature_id,omitempty"` // Связь с номенклатурой для простых допов
+	RecipeID         *string `gorm:"type:uuid;index" json:"recipe_id,omitempty"` // Связь с рецептом для сложных допов (BOM)
+	IsActive          bool    `gorm:"default:true" json:"is_active"`
+	CreatedAt         int64   `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt         int64   `gorm:"autoUpdateTime" json:"updated_at"`
+	
+	// Связи
+	Nomenclature  *NomenclatureItem `gorm:"foreignKey:NomenclatureID" json:"nomenclature,omitempty"`
+	Recipe        *Recipe           `gorm:"foreignKey:RecipeID" json:"recipe,omitempty"`
+}
+
+// PizzaExtra - таблица связи пицца-доп
+type PizzaExtra struct {
+	ID          uint   `gorm:"primaryKey"`
+	PizzaName   string `gorm:"index:idx_pizza_extras_pizza_name;not null"`
+	ExtraID     uint   `gorm:"index:idx_pizza_extras_extra_id;not null"`
+	IsDefault   bool   `gorm:"default:false"` // Доп доступен по умолчанию
+	DisplayOrder int   `gorm:"default:0"`     // Порядок отображения
 	CreatedAt int64  `gorm:"autoCreateTime"`
-	UpdatedAt int64  `gorm:"autoUpdateTime"`
+	UpdatedAt   int64  `gorm:"autoUpdateTime"`
+	
+	// Связи
+	Extra ExtraDB `gorm:"foreignKey:ExtraID;references:ID"`
 }
 
 // TableName для правильных имен таблиц
@@ -55,6 +76,10 @@ func (ExtraDB) TableName() string {
 	return "extras"
 }
 
+func (PizzaExtra) TableName() string {
+	return "pizza_extras"
+}
+
 // AutoMigrate создает таблицы в БД
 // Игнорирует ошибки constraint, так как таблицы уже созданы через SQL миграцию
 func AutoMigrate(db *gorm.DB) error {
@@ -63,6 +88,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&PizzaRecipe{},
 		&PizzaSetDB{},
 		&ExtraDB{},
+		&PizzaExtra{},
 	)
 	if err != nil {
 		errStr := err.Error()
@@ -111,13 +137,13 @@ func AutoMigrate(db *gorm.DB) error {
 		}
 	}
 	
-	// Теперь выполняем AutoMigrate
-	if err := db.AutoMigrate(&Staff{}); err != nil {
-		log.Printf("⚠️ AutoMigrate для Staff failed: %v (continuing)", err)
-		// Не возвращаем ошибку, продолжаем миграцию других таблиц
-	} else {
-		log.Println("✅ Staff table migrated successfully")
-	}
+	// ПРИМЕЧАНИЕ: Staff мигрируется ниже (после User), так как теперь имеет UserID foreign key
+	// Временная заглушка для обратной совместимости - будет удалена после миграции всех данных
+	// if err := db.AutoMigrate(&Staff{}); err != nil {
+	// 	log.Printf("⚠️ AutoMigrate для Staff failed: %v (continuing)", err)
+	// } else {
+	// 	log.Println("✅ Staff table migrated successfully")
+	// }
 	
 	// Мигрируем NomenclatureCategory
 	if err := db.AutoMigrate(&NomenclatureCategory{}); err != nil {
@@ -161,6 +187,32 @@ func AutoMigrate(db *gorm.DB) error {
 	}
 	log.Println("✅ RecipeIngredient table migrated successfully")
 
+	// Мигрируем RecipeNode (иерархическая структура папок для рецептов)
+	if err := db.AutoMigrate(&RecipeNode{}); err != nil {
+		log.Printf("❌ AutoMigrate для RecipeNode failed: %v", err)
+		return err
+	}
+	log.Println("✅ RecipeNode table migrated successfully")
+
+	// Мигрируем таблицы для Technologist Workspace
+	if err := db.AutoMigrate(&RecipeVersion{}); err != nil {
+		log.Printf("❌ AutoMigrate для RecipeVersion failed: %v", err)
+		return err
+	}
+	log.Println("✅ RecipeVersion table migrated successfully")
+
+	if err := db.AutoMigrate(&TrainingMaterial{}); err != nil {
+		log.Printf("❌ AutoMigrate для TrainingMaterial failed: %v", err)
+		return err
+	}
+	log.Println("✅ TrainingMaterial table migrated successfully")
+
+	if err := db.AutoMigrate(&RecipeExam{}); err != nil {
+		log.Printf("❌ AutoMigrate для RecipeExam failed: %v", err)
+		return err
+	}
+	log.Println("✅ RecipeExam table migrated successfully")
+
 	// Мигрируем StockMovement
 	if err := db.AutoMigrate(&StockMovement{}); err != nil {
 		log.Printf("❌ AutoMigrate для StockMovement failed: %v", err)
@@ -189,6 +241,22 @@ func AutoMigrate(db *gorm.DB) error {
 	}
 	log.Println("✅ Invoice table migrated successfully")
 
+	// Очищаем "осиротевшие" invoice_id перед добавлением foreign key constraint
+	// Устанавливаем invoice_id в NULL для записей, где invoice_id не существует в invoices
+	if db.Migrator().HasTable(&FinanceTransaction{}) {
+		result := db.Exec(`
+			UPDATE finance_transactions 
+			SET invoice_id = NULL 
+			WHERE invoice_id IS NOT NULL 
+			AND invoice_id NOT IN (SELECT id FROM invoices)
+		`)
+		if result.Error != nil {
+			log.Printf("⚠️ Очистка осиротевших invoice_id: %v (continuing)", result.Error)
+		} else if result.RowsAffected > 0 {
+			log.Printf("✅ Очищено %d осиротевших invoice_id в finance_transactions", result.RowsAffected)
+		}
+	}
+
 	// Мигрируем FinanceTransaction
 	if err := db.AutoMigrate(&FinanceTransaction{}); err != nil {
 		log.Printf("❌ AutoMigrate для FinanceTransaction failed: %v", err)
@@ -216,6 +284,107 @@ func AutoMigrate(db *gorm.DB) error {
 		return err
 	}
 	log.Println("✅ Branch table migrated successfully")
+
+	// ============================================
+	// МИГРАЦИЯ ПОЛЬЗОВАТЕЛЕЙ И ПРОФИЛЕЙ
+	// Порядок важен: сначала User (базовая таблица), потом профили (Staff, Customer)
+	// ============================================
+
+	// Мигрируем User (центральная таблица аутентификации для всех пользователей)
+	// Должна быть первой, так как Staff и Customer ссылаются на User
+	if err := db.AutoMigrate(&User{}); err != nil {
+		log.Printf("❌ AutoMigrate для User failed: %v", err)
+		return err
+	}
+	log.Println("✅ User table migrated successfully")
+
+	// Мигрируем Customer (профиль клиента - связан с User через UserID)
+	// Может существовать независимо от Staff (обычный клиент)
+	if err := db.AutoMigrate(&Customer{}); err != nil {
+		log.Printf("❌ AutoMigrate для Customer failed: %v", err)
+		return err
+	}
+	log.Println("✅ Customer table migrated successfully (with UserID foreign key)")
+
+	// Мигрируем CustomerAddress (адреса доставки клиентов)
+	// Зависит от Customer
+	if err := db.AutoMigrate(&CustomerAddress{}); err != nil {
+		log.Printf("❌ AutoMigrate для CustomerAddress failed: %v", err)
+		return err
+	}
+	log.Println("✅ CustomerAddress table migrated successfully")
+
+	// Мигрируем Staff (профиль сотрудника - связан с User через UserID)
+	// Должен мигрироваться ПОСЛЕ User, так как имеет foreign key на User
+	// ПРИМЕЧАНИЕ: Старая миграция Staff (строка 115) закомментирована для избежания дубликата
+	if err := db.AutoMigrate(&Staff{}); err != nil {
+		log.Printf("❌ AutoMigrate для Staff failed: %v", err)
+		return err
+	}
+	log.Println("✅ Staff table migrated successfully (with UserID foreign key)")
+
+	// Мигрируем PurchaseOrder (должна быть создана перед ProcurementPlanItem)
+	if err := db.AutoMigrate(&PurchaseOrder{}); err != nil {
+		log.Printf("❌ AutoMigrate для PurchaseOrder failed: %v", err)
+		return err
+	}
+	log.Println("✅ PurchaseOrder table migrated successfully")
+
+	// Мигрируем PurchaseOrderItem
+	if err := db.AutoMigrate(&PurchaseOrderItem{}); err != nil {
+		log.Printf("❌ AutoMigrate для PurchaseOrderItem failed: %v", err)
+		return err
+	}
+	log.Println("✅ PurchaseOrderItem table migrated successfully")
+
+	// Мигрируем ProcurementPlan
+	if err := db.AutoMigrate(&ProcurementPlan{}); err != nil {
+		log.Printf("❌ AutoMigrate для ProcurementPlan failed: %v", err)
+		return err
+	}
+	log.Println("✅ ProcurementPlan table migrated successfully")
+
+	// Мигрируем ProcurementPlanItem
+	if err := db.AutoMigrate(&ProcurementPlanItem{}); err != nil {
+		log.Printf("❌ AutoMigrate для ProcurementPlanItem failed: %v", err)
+		return err
+	}
+	log.Println("✅ ProcurementPlanItem table migrated successfully")
+
+	// Мигрируем ProcurementHistory
+	if err := db.AutoMigrate(&ProcurementHistory{}); err != nil {
+		log.Printf("❌ AutoMigrate для ProcurementHistory failed: %v", err)
+		return err
+	}
+	log.Println("✅ ProcurementHistory table migrated successfully")
+
+	// Мигрируем DemandForecast
+	if err := db.AutoMigrate(&DemandForecast{}); err != nil {
+		log.Printf("❌ AutoMigrate для DemandForecast failed: %v", err)
+		return err
+	}
+	log.Println("✅ DemandForecast table migrated successfully")
+
+	// Мигрируем SupplierCatalogItem (каталог поставщиков)
+	if err := db.AutoMigrate(&SupplierCatalogItem{}); err != nil {
+		log.Printf("❌ AutoMigrate для SupplierCatalogItem failed: %v", err)
+		return err
+	}
+	log.Println("✅ SupplierCatalogItem table migrated successfully")
+	
+	// Мигрируем UoMConversionRule (правила конвертации единиц измерения)
+	if err := db.AutoMigrate(&UoMConversionRule{}); err != nil {
+		log.Printf("❌ AutoMigrate для UoMConversionRule failed: %v", err)
+		return err
+	}
+	log.Println("✅ UoMConversionRule table migrated successfully")
+
+	// Мигрируем RevenuePlan (планы выручки для аналитики)
+	if err := db.AutoMigrate(&RevenuePlan{}); err != nil {
+		log.Printf("❌ AutoMigrate для RevenuePlan failed: %v", err)
+		return err
+	}
+	log.Println("✅ RevenuePlan table migrated successfully")
 
 	// Инициализируем дефолтные данные
 	if err := InitDefaultData(db); err != nil {

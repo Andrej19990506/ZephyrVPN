@@ -34,6 +34,8 @@ func InitDefaultRoles(db *gorm.DB) error {
 		{ID: "2", Name: "Courier", Label: "Курьер", Description: "Доставка заказов", IsActive: true},
 		{ID: "3", Name: "Admin", Label: "Администратор", Description: "Управление системой", IsActive: true},
 		{ID: "4", Name: "Manager", Label: "Менеджер", Description: "Управление персоналом и операциями", IsActive: true},
+		{ID: "5", Name: "Technologist", Label: "Технолог", Description: "Управление рецептами и производством", IsActive: true},
+		{ID: "6", Name: "SuperAdmin", Label: "Супер-администратор", Description: "Полный доступ ко всем функциям", IsActive: true},
 	}
 
 	for _, role := range defaultRoles {

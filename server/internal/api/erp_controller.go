@@ -1,16 +1,20 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/segmentio/kafka-go"
+	"gorm.io/gorm"
 	"google.golang.org/protobuf/proto"
 	"zephyrvpn/server/internal/models"
 	"zephyrvpn/server/internal/pb"
@@ -19,17 +23,36 @@ import (
 )
 
 type ERPController struct {
-	redisUtil   *utils.RedisClient
-	kafkaBrokers string
-	slotService *services.SlotService
+	redisUtil          *utils.RedisClient
+	kafkaBrokers       string
+	slotService        *services.SlotService
+	revenueService     *services.RevenueService
+	dailyPlanService   *services.DailyPlanService
+	kitchenLoadService *services.KitchenLoadService
+	stationAssignService *services.StationAssignmentService
 }
 
-func NewERPController(redisUtil *utils.RedisClient, kafkaBrokers string, openHour, closeHour, closeMin int) *ERPController {
-	slotService := services.NewSlotService(redisUtil, openHour, closeHour, closeMin)
+func NewERPController(redisUtil *utils.RedisClient, kafkaBrokers string, db interface{}, openHour, openMin, closeHour, closeMin int) *ERPController {
+	// Преобразуем db в *gorm.DB если возможно
+	var gormDB *gorm.DB
+	if db != nil {
+		if gdb, ok := db.(*gorm.DB); ok {
+			gormDB = gdb
+		}
+	}
+	slotService := services.NewSlotService(redisUtil, gormDB, openHour, openMin, closeHour, closeMin)
+	revenueService := services.NewRevenueService(redisUtil, gormDB)
+	dailyPlanService := services.NewDailyPlanService(redisUtil)
+	kitchenLoadService := services.NewKitchenLoadService(slotService)
+	stationAssignService := services.NewStationAssignmentService(gormDB, redisUtil)
 	return &ERPController{
-		redisUtil:   redisUtil,
-		kafkaBrokers: kafkaBrokers,
-		slotService: slotService,
+		redisUtil:           redisUtil,
+		kafkaBrokers:        kafkaBrokers,
+		slotService:         slotService,
+		revenueService:      revenueService,
+		dailyPlanService:    dailyPlanService,
+		kitchenLoadService:  kitchenLoadService,
+		stationAssignService: stationAssignService,
 	}
 }
 
@@ -54,6 +77,9 @@ func (ec *ERPController) GetOrders(c *gin.Context) {
 	if role == "" {
 		role = "kitchen" // По умолчанию для кухни
 	}
+
+	// Получаем station_id из query параметра (для фильтрации заказов по станции)
+	stationID := c.Query("station_id")
 
 	// Проверяем ожидающие заказы и добавляем их в активные, если наступило время показа
 	ec.checkAndActivatePendingOrders()
@@ -106,6 +132,22 @@ func (ec *ERPController) GetOrders(c *gin.Context) {
 			orderJSON, _ := json.Marshal(order)
 			orderKey := fmt.Sprintf("erp:order:%s", orderID)
 			ec.redisUtil.SetBytes(orderKey, orderJSON, 24*time.Hour)
+		}
+		
+		// Фильтруем заказы по станции (если указан station_id)
+		if stationID != "" && ec.stationAssignService != nil {
+			stationOrder, canWork, err := ec.stationAssignService.GetOrderForStation(order, stationID)
+			if err != nil {
+				log.Printf("⚠️ GetOrders: ошибка получения заказа для станции %s: %v", stationID, err)
+				continue
+			}
+			if stationOrder == nil {
+				// Заказ не виден для этой станции
+				continue
+			}
+			// Используем отфильтрованный заказ и устанавливаем флаг canWork
+			order = stationOrder
+			order.CanWork = canWork
 		}
 		
 		// Фильтруем данные в зависимости от роли
@@ -202,7 +244,7 @@ func (ec *ERPController) GetOrder(c *gin.Context) {
 	c.JSON(http.StatusOK, order)
 }
 
-// GetStats получает статистику для ERP
+// GetStats получает статистику для ERP (расширенная версия с выручкой)
 func (ec *ERPController) GetStats(c *gin.Context) {
 	var total, today, pending string = "0", "0", "0"
 	processed := 0
@@ -230,14 +272,44 @@ func (ec *ERPController) GetStats(c *gin.Context) {
 		ec.redisUtil.Set("erp:orders:processed", fmt.Sprintf("%d", processed), 0)
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	// Получаем выручку за сегодня
+	var revenue *services.RevenueStats
+	if ec.revenueService != nil {
+		revenue, _ = ec.revenueService.GetRevenueForToday()
+	}
+
+	// Получаем план на сегодня
+	var dailyPlan float64 = 500000.0
+	if ec.dailyPlanService != nil {
+		dailyPlan, _ = ec.dailyPlanService.GetDailyPlanForToday()
+	}
+
+	response := gin.H{
 		"total_orders":     total,
 		"today_orders":     today,
 		"pending_orders":   pending,
 		"processed_orders": fmt.Sprintf("%d", processed),
 		"system":           "ЕРПИ ТЕСТ",
 		"timestamp":        time.Now().Format(time.RFC3339),
-	})
+	}
+
+	// Добавляем выручку если есть
+	if revenue != nil {
+		response["revenue"] = gin.H{
+			"total":            revenue.Total,
+			"cash":             revenue.Cash,
+			"cashless":         revenue.Cashless,
+			"online":           revenue.Online,
+			"discounts":         revenue.Discounts,
+			"completed_orders": revenue.CompletedOrders,
+			"change":           revenue.Change,
+		}
+	}
+
+	// Добавляем план на день
+	response["daily_plan"] = dailyPlan
+
+	c.JSON(http.StatusOK, response)
 }
 
 // GetOrdersBatch получает следующую партию АКТИВНЫХ заказов (по 50 штук)
@@ -612,15 +684,38 @@ func (ec *ERPController) getOrderFromRedis(orderID string) (*models.PizzaOrder, 
 			IsSet:             pbOrder.IsSet,
 			SetName:           pbOrder.SetName,
 			TargetSlotID:      pbOrder.TargetSlotId,
+			DiscountAmount:    int(pbOrder.DiscountAmount),
+			DiscountPercent:   int(pbOrder.DiscountPercent),
+			FinalPrice:        int(pbOrder.FinalPrice),
 		}
 		// Конвертируем Items если есть
 		for _, pbItem := range pbOrder.Items {
+			// Вычисляем цену пиццы и допов из доступных данных
+			// В protobuf пока нет отдельных полей, поэтому вычисляем
+			pizzaPrice := int(pbItem.Price)
+			extrasPrice := 0
+			
+			// Если есть допы, пытаемся вычислить их цену
+			if len(pbItem.Extras) > 0 {
+				// Получаем цену пиццы из меню
+				if pizza, exists := models.GetPizza(pbItem.PizzaName); exists {
+					pizzaPrice = pizza.Price
+					// Вычисляем цену допов: общая цена - цена пиццы
+					extrasPrice = int(pbItem.Price) - pizza.Price
+					if extrasPrice < 0 {
+						extrasPrice = 0
+					}
+				}
+			}
+			
 			order.Items = append(order.Items, models.PizzaItem{
 				PizzaName:   pbItem.PizzaName,
 				Ingredients: pbItem.Ingredients,
 				Extras:      pbItem.Extras,
 				Quantity:    int(pbItem.Quantity),
 				Price:       int(pbItem.Price),
+				PizzaPrice:  pizzaPrice,
+				ExtrasPrice: extrasPrice,
 			})
 		}
 		
@@ -661,6 +756,11 @@ func (ec *ERPController) getOrderFromRedis(orderID string) (*models.PizzaOrder, 
 			}
 		}
 		
+		// Если FinalPrice не задано или равно 0, используем TotalPrice как fallback
+		if order.FinalPrice == 0 {
+			order.FinalPrice = order.TotalPrice
+		}
+		
 		return order, nil
 	}
 
@@ -668,6 +768,30 @@ func (ec *ERPController) getOrderFromRedis(orderID string) (*models.PizzaOrder, 
 	var order models.PizzaOrder
 	if err := json.Unmarshal(orderBytes, &order); err != nil {
 		return nil, err
+	}
+	
+	// Вычисляем pizza_price и extras_price для каждого item, если они не установлены
+	for i := range order.Items {
+		if order.Items[i].PizzaPrice == 0 && order.Items[i].ExtrasPrice == 0 {
+			// Получаем цену пиццы из меню
+			if pizza, exists := models.GetPizza(order.Items[i].PizzaName); exists {
+				order.Items[i].PizzaPrice = pizza.Price
+				// Вычисляем цену допов: общая цена - цена пиццы
+				order.Items[i].ExtrasPrice = order.Items[i].Price - pizza.Price
+				if order.Items[i].ExtrasPrice < 0 {
+					order.Items[i].ExtrasPrice = 0
+				}
+			} else {
+				// Если пицца не найдена, используем общую цену как цену пиццы
+				order.Items[i].PizzaPrice = order.Items[i].Price
+				order.Items[i].ExtrasPrice = 0
+			}
+		}
+	}
+	
+	// Если FinalPrice не задано или равно 0, используем TotalPrice как fallback
+	if order.FinalPrice == 0 {
+		order.FinalPrice = order.TotalPrice
 	}
 	
 	// Если есть TargetSlotID, но нет времени начала слота, получаем его из Redis или SlotService
@@ -774,7 +898,16 @@ func (ec *ERPController) GetKafkaOrdersSample(c *gin.Context) {
 	}
 
 	brokers := strings.Split(ec.kafkaBrokers, ",")
-	conn, err := kafka.Dial("tcp", brokers[0])
+	if len(brokers) == 0 || brokers[0] == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Kafka broker address is empty",
+		})
+		return
+	}
+	brokerAddr := strings.TrimSpace(brokers[0])
+	
+	// Пробуем подключиться к Kafka
+	conn, err := kafka.Dial("tcp", brokerAddr)
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"error": fmt.Sprintf("Failed to connect to Kafka: %v", err),
@@ -783,11 +916,8 @@ func (ec *ERPController) GetKafkaOrdersSample(c *gin.Context) {
 	}
 	defer conn.Close()
 
-	// Подключаемся к партиции 0 для получения offset
-	partitionConn, err := kafka.DialPartition(context.Background(), "tcp", brokers[0], kafka.Partition{
-		Topic: "pizza-orders",
-		ID:    0,
-	})
+	// Используем DialLeader вместо DialPartition (более надежный способ)
+	partitionConn, err := kafka.DialLeader(context.Background(), "tcp", brokerAddr, "pizza-orders", 0)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("Failed to connect to partition: %v", err),
@@ -837,14 +967,27 @@ func (ec *ERPController) GetKafkaOrdersSample(c *gin.Context) {
 		// Пробуем распарсить Protobuf
 		pbOrder := &pb.PizzaOrder{}
 		if err := proto.Unmarshal(msg.Value, pbOrder); err == nil {
-			orders = append(orders, map[string]interface{}{
+			orderData := map[string]interface{}{
 				"id":          pbOrder.Id,
 				"display_id":  pbOrder.DisplayId,
 				"customer_id": pbOrder.CustomerId,
 				"status":      pbOrder.Status,
 				"created_at":  time.Unix(0, pbOrder.CreatedAt).Format(time.RFC3339),
 				"size_bytes":  len(msg.Value),
-			})
+			}
+			
+			// Добавляем информацию о слоте и времени показа
+			if pbOrder.TargetSlotId != "" {
+				orderData["target_slot_id"] = pbOrder.TargetSlotId
+			}
+			if pbOrder.VisibleAt != "" {
+				orderData["visible_at"] = pbOrder.VisibleAt
+			}
+			if pbOrder.TotalPrice > 0 {
+				orderData["total_price"] = pbOrder.TotalPrice
+			}
+			
+			orders = append(orders, orderData)
 		}
 	}
 
@@ -875,25 +1018,149 @@ func (ec *ERPController) GetSlots(c *gin.Context) {
 	}
 
 	// Конвертируем слоты в формат с правильными временами (ISO 8601 строки)
+	type OrderResponse struct {
+		ID      string `json:"id"`
+		Total   int    `json:"total"`
+		IsPickup bool  `json:"is_pickup"`
+	}
+	
 	type SlotResponse struct {
-		SlotID      string `json:"slot_id"`
-		StartTime   string `json:"start_time"`   // ISO 8601 строка
-		EndTime     string `json:"end_time"`     // ISO 8601 строка
-		CurrentLoad int    `json:"current_load"`
-		MaxCapacity int    `json:"max_capacity"`
+		SlotID        string          `json:"slot_id"`
+		StartTime     string          `json:"start_time"`     // ISO 8601 строка
+		EndTime       string          `json:"end_time"`       // ISO 8601 строка
+		CurrentLoad   int             `json:"current_load"`
+		MaxCapacity   int             `json:"max_capacity"`
+		OrdersCount   int             `json:"orders_count"`
+		DeliveryCount int             `json:"delivery_count"`
+		PickupCount   int             `json:"pickup_count"`
+		DeliveryPlan  int             `json:"delivery_plan"`  // План для доставки (85% от max_capacity)
+		PickupPlan    int             `json:"pickup_plan"`     // План для самовывоза (15% от max_capacity)
+		Disabled      bool            `json:"disabled"`        // Отключен ли слот
+		Orders        []OrderResponse `json:"orders"`
 	}
 
 	slotResponses := make([]SlotResponse, len(slots))
 	for i, slot := range slots {
+		// Конвертируем заказы (если slot.Orders == nil, создаем пустой массив)
+		orders := slot.Orders
+		if orders == nil {
+			orders = make([]services.OrderInfo, 0)
+		}
+		orderResponses := make([]OrderResponse, len(orders))
+		for j, order := range orders {
+			orderResponses[j] = OrderResponse{
+				ID:       order.ID,
+				Total:    order.Total,
+				IsPickup: order.IsPickup,
+			}
+		}
+		
+		// Убеждаемся, что orderResponses не nil (даже если пустой)
+		// КРИТИЧНО: Всегда инициализируем как пустой массив, чтобы поле всегда было в JSON
+		if orderResponses == nil {
+			orderResponses = make([]OrderResponse, 0)
+		}
+		
+		// КРИТИЧНО: Используем планы из SlotInfo (они уже загружены из Redis в GetAllSlots)
+		// Если планы = 0, это может быть либо сохраненное значение 0, либо отсутствие в Redis
+		// Поэтому проверяем Redis напрямую, и только если там нет - вычисляем по умолчанию
+		deliveryPlan := slot.DeliveryPlan
+		pickupPlan := slot.PickupPlan
+		
+		// Проверяем, есть ли планы в Redis для этого слота
+		// Если оба плана = 0, проверяем Redis - возможно, они просто не были установлены
+		if deliveryPlan == 0 && pickupPlan == 0 && slot.MaxCapacity > 0 {
+			// Пробуем загрузить из Redis
+			redisDeliveryPlan, redisPickupPlan, err := ec.slotService.GetSlotPlan(slot.SlotID)
+			if err == nil {
+				// Если в Redis есть хотя бы один план - используем их
+				if redisDeliveryPlan > 0 || redisPickupPlan > 0 {
+					deliveryPlan = redisDeliveryPlan
+					pickupPlan = redisPickupPlan
+				} else {
+					// В Redis тоже 0 - вычисляем по умолчанию
+					deliveryPlan = int(float64(slot.MaxCapacity) * 0.85)
+					pickupPlan = int(float64(slot.MaxCapacity) * 0.15)
+				}
+			} else {
+				// Ошибка загрузки из Redis - вычисляем по умолчанию
+				deliveryPlan = int(float64(slot.MaxCapacity) * 0.85)
+				pickupPlan = int(float64(slot.MaxCapacity) * 0.15)
+			}
+		}
+		
+		// КРИТИЧНО: Явно устанавливаем Disabled, даже если slot.Disabled = false
+		// Это гарантирует, что поле всегда будет в JSON ответе
+		disabledValue := slot.Disabled
+		
+		// КРИТИЧНО: Явно инициализируем Orders как пустой массив, если он nil
+		// Это гарантирует, что поле всегда будет в JSON ответе (даже как пустой массив [])
+		finalOrders := orderResponses
+		if finalOrders == nil {
+			finalOrders = make([]OrderResponse, 0)
+		}
+		
 		slotResponses[i] = SlotResponse{
-			SlotID:      slot.SlotID,
-			StartTime:   slot.StartTime.Format(time.RFC3339),
-			EndTime:     slot.EndTime.Format(time.RFC3339),
-			CurrentLoad: slot.CurrentLoad,
-			MaxCapacity: slot.MaxCapacity,
+			SlotID:        slot.SlotID,
+			StartTime:     slot.StartTime.Format(time.RFC3339),
+			EndTime:       slot.EndTime.Format(time.RFC3339),
+			CurrentLoad:   slot.CurrentLoad,
+			MaxCapacity:   slot.MaxCapacity,
+			OrdersCount:   slot.OrdersCount,
+			DeliveryCount: slot.DeliveryCount,
+			PickupCount:   slot.PickupCount,
+			DeliveryPlan:  deliveryPlan,
+			PickupPlan:    pickupPlan,
+			Disabled:      disabledValue, // Явно устанавливаем значение
+			Orders:        finalOrders,   // КРИТИЧНО: Всегда не-nil массив
+		}
+		
+		// ОТЛАДКА: Логируем orders для слотов с заказами
+		if len(finalOrders) > 0 {
+			log.Printf("📦 GetSlots: слот %s имеет %d заказов: %+v", slot.SlotID, len(finalOrders), finalOrders)
+		}
+		
+		// Логируем для отладки (только для первого слота)
+		if i == 0 {
+			log.Printf("🔍 GetSlots: первый слот - Orders count: %d, orderResponses len: %d, Disabled: %v", 
+				len(orders), len(orderResponses), slot.Disabled)
+		}
+		
+		// КРИТИЧНО: Логируем disabled статус для всех слотов, чтобы проверить, что он правильно устанавливается
+		if slot.Disabled {
+			log.Printf("🔴 GetSlots: слот %s отключен (Disabled=true)", slot.SlotID)
 		}
 	}
 
+	// КРИТИЧНО: Логируем первый слот для отладки disabled поля
+	if len(slotResponses) > 0 {
+		log.Printf("🔍 GetSlots: первый слот в ответе - Disabled: %v, SlotID: %s", 
+			slotResponses[0].Disabled, slotResponses[0].SlotID)
+	}
+	
+	// КРИТИЧНО: Логируем disabled статус и orders для всех слотов перед отправкой
+	for i, slotResp := range slotResponses {
+		if slotResp.Disabled {
+			log.Printf("🔴 GetSlots: отправляем слот %s с disabled=true", slotResp.SlotID)
+		}
+		if i < 3 {
+			log.Printf("🔍 GetSlots: слот %s - Disabled=%v, Orders count=%d (в SlotResponse)", 
+				slotResp.SlotID, slotResp.Disabled, len(slotResp.Orders))
+		}
+		// Логируем слоты с заказами
+		if len(slotResp.Orders) > 0 {
+			log.Printf("📦 GetSlots: слот %s имеет %d заказов: %+v", 
+				slotResp.SlotID, len(slotResp.Orders), slotResp.Orders)
+		}
+	}
+	
+	// КРИТИЧНО: Проверяем, что orders сериализуются правильно
+	// Создаем тестовый JSON для проверки
+	if len(slotResponses) > 0 {
+		testJSON, _ := json.Marshal(slotResponses[0])
+		log.Printf("🔍 GetSlots: тестовая сериализация первого слота: %s", string(testJSON))
+	}
+	
 	c.JSON(http.StatusOK, gin.H{
 		"slots": slotResponses,
 		"count": len(slotResponses),
@@ -973,3 +1240,463 @@ func (ec *ERPController) UpdateSlotConfig(c *gin.Context) {
 	})
 }
 
+// ToggleSlot отключает/включает слот (использует SetSlotDisabled из SlotService)
+func (ec *ERPController) ToggleSlot(c *gin.Context) {
+	slotID := c.Param("slot_id")
+	
+	var req struct {
+		Disabled bool `json:"disabled" binding:"required"`
+	}
+	
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid request",
+			"details": err.Error(),
+		})
+		return
+	}
+	
+	if ec.slotService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "SlotService not available",
+		})
+		return
+	}
+	
+	err := ec.slotService.SetSlotDisabled(slotID, req.Disabled)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	
+	// Отправляем обновление через WebSocket
+	BroadcastERPUpdate("slot_toggled", map[string]interface{}{
+		"slot_id": slotID,
+		"disabled": req.Disabled,
+		"message": fmt.Sprintf("Слот %s", map[bool]string{true: "отключен", false: "включен"}[req.Disabled]),
+	})
+	
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"slot_id": slotID,
+		"disabled": req.Disabled,
+		"message": fmt.Sprintf("Слот %s", map[bool]string{true: "отключен", false: "включен"}[req.Disabled]),
+	})
+}
+
+// UpdateSlotPlan обновляет план для слота (delivery_plan и pickup_plan)
+func (ec *ERPController) UpdateSlotPlan(c *gin.Context) {
+	slotID := c.Param("slot_id")
+	log.Printf("🔍 UpdateSlotPlan: получен slot_id = %s", slotID)
+	
+	var req struct {
+		DeliveryPlan int `json:"delivery_plan" binding:"required"`
+		PickupPlan   int `json:"pickup_plan" binding:"required"`
+	}
+	
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid request",
+			"details": err.Error(),
+		})
+		return
+	}
+	
+	if req.DeliveryPlan < 0 || req.PickupPlan < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "plans must be non-negative",
+		})
+		return
+	}
+	
+	if ec.slotService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "SlotService not available",
+		})
+		return
+	}
+	
+	err := ec.slotService.SetSlotPlan(slotID, req.DeliveryPlan, req.PickupPlan)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	
+	// Отправляем обновление через WebSocket
+	BroadcastERPUpdate("slot_plan_updated", map[string]interface{}{
+		"slot_id":       slotID,
+		"delivery_plan": req.DeliveryPlan,
+		"pickup_plan":   req.PickupPlan,
+		"message":       "План слота обновлен",
+	})
+	
+	c.JSON(http.StatusOK, gin.H{
+		"success":       true,
+		"slot_id":       slotID,
+		"delivery_plan": req.DeliveryPlan,
+		"pickup_plan":   req.PickupPlan,
+		"message":       "План слота обновлен",
+	})
+}
+
+// UpdateSlotsPlanBatch обновляет планы для нескольких слотов сразу (батч)
+func (ec *ERPController) UpdateSlotsPlanBatch(c *gin.Context) {
+	var req struct {
+		Slots []struct {
+			SlotID       string `json:"slot_id" binding:"required"`
+			DeliveryPlan int    `json:"delivery_plan" binding:"required"`
+			PickupPlan   int    `json:"pickup_plan" binding:"required"`
+		} `json:"slots" binding:"required,min=1"`
+	}
+	
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid request",
+			"details": err.Error(),
+		})
+		return
+	}
+	
+	if ec.slotService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "SlotService not available",
+		})
+		return
+	}
+	
+	// Обновляем планы для всех слотов
+	updatedSlots := make([]map[string]interface{}, 0, len(req.Slots))
+	errors := make([]string, 0)
+	
+	for _, slotReq := range req.Slots {
+		if slotReq.DeliveryPlan < 0 || slotReq.PickupPlan < 0 {
+			errors = append(errors, fmt.Sprintf("slot %s: plans must be non-negative", slotReq.SlotID))
+			continue
+		}
+		
+		err := ec.slotService.SetSlotPlan(slotReq.SlotID, slotReq.DeliveryPlan, slotReq.PickupPlan)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("slot %s: %v", slotReq.SlotID, err))
+			continue
+		}
+		
+		updatedSlots = append(updatedSlots, map[string]interface{}{
+			"slot_id":       slotReq.SlotID,
+			"delivery_plan": slotReq.DeliveryPlan,
+			"pickup_plan":   slotReq.PickupPlan,
+		})
+		
+		// Отправляем обновление через WebSocket для каждого слота
+		BroadcastERPUpdate("slot_plan_updated", map[string]interface{}{
+			"slot_id":       slotReq.SlotID,
+			"delivery_plan": slotReq.DeliveryPlan,
+			"pickup_plan":   slotReq.PickupPlan,
+			"message":       fmt.Sprintf("План слота %s обновлен", slotReq.SlotID),
+		})
+	}
+	
+	log.Printf("✅ UpdateSlotsPlanBatch: обновлено %d из %d слотов", len(updatedSlots), len(req.Slots))
+	
+	if len(errors) > 0 {
+		log.Printf("⚠️ UpdateSlotsPlanBatch: ошибки при обновлении: %v", errors)
+	}
+	
+	c.JSON(http.StatusOK, gin.H{
+		"success":      len(errors) == 0,
+		"updated":      len(updatedSlots),
+		"total":        len(req.Slots),
+		"updated_slots": updatedSlots,
+		"errors":       errors,
+	})
+}
+
+// UpdateSlotDisabled обновляет статус отключения слота
+func (ec *ERPController) UpdateSlotDisabled(c *gin.Context) {
+	slotID := c.Param("slot_id")
+	// Декодируем slot_id, так как он может быть закодирован (содержит двоеточие)
+	decodedSlotID, err := url.QueryUnescape(slotID)
+	if err == nil && decodedSlotID != slotID {
+		log.Printf("🔍 UpdateSlotDisabled: декодирован slot_id: %s -> %s", slotID, decodedSlotID)
+		slotID = decodedSlotID
+	}
+	log.Printf("🔍 UpdateSlotDisabled: получен slot_id = %s (raw: %s)", slotID, c.Param("slot_id"))
+	
+	// КРИТИЧНО: Читаем тело запроса для диагностики
+	bodyBytes, _ := c.GetRawData()
+	log.Printf("📥 UpdateSlotDisabled: тело запроса (raw): %s", string(bodyBytes))
+	
+	// Восстанавливаем тело для дальнейшей обработки
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	
+	// КРИТИЧНО: Используем указатель на bool, чтобы отличить отсутствие поля от false
+	// binding:"required" для bool не работает правильно, когда значение false
+	var req struct {
+		Disabled *bool `json:"disabled" binding:"required"`
+	}
+	
+	// Используем = вместо :=, так как err уже объявлена выше
+	if err = c.ShouldBindJSON(&req); err != nil {
+		log.Printf("❌ UpdateSlotDisabled: ошибка парсинга JSON: %v", err)
+		log.Printf("📥 UpdateSlotDisabled: тело запроса было: %s", string(bodyBytes))
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid request",
+			"details": err.Error(),
+		})
+		return
+	}
+	
+	// Проверяем, что поле было передано
+	if req.Disabled == nil {
+		log.Printf("❌ UpdateSlotDisabled: поле disabled не передано")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid request",
+			"details": "field 'disabled' is required",
+		})
+		return
+	}
+	
+	disabledValue := *req.Disabled
+	log.Printf("✅ UpdateSlotDisabled: успешно распарсен запрос, disabled = %v", disabledValue)
+	
+	if ec.slotService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "SlotService not available",
+		})
+		return
+	}
+	
+	// Используем = вместо :=, так как err уже объявлена выше
+	err = ec.slotService.SetSlotDisabled(slotID, disabledValue)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err.Error(),
+		})
+		return
+	}
+	
+	// Отправляем обновление через WebSocket
+	BroadcastERPUpdate("slot_disabled_updated", map[string]interface{}{
+		"slot_id":  slotID,
+		"disabled": disabledValue,
+		"message":  fmt.Sprintf("Слот %s", map[bool]string{true: "отключен", false: "включен"}[disabledValue]),
+	})
+	
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"slot_id":  slotID,
+		"disabled": disabledValue,
+		"message":  fmt.Sprintf("Слот %s", map[bool]string{true: "отключен", false: "включен"}[disabledValue]),
+	})
+}
+
+// UpdateSlotCapacity обновляет лимит конкретного слота
+func (ec *ERPController) UpdateSlotCapacity(c *gin.Context) {
+	slotID := c.Param("slot_id")
+	
+	var req struct {
+		MaxCapacity int `json:"max_capacity" binding:"required"`
+	}
+	
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid request",
+			"details": err.Error(),
+		})
+		return
+	}
+	
+	if req.MaxCapacity <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "max_capacity must be greater than 0",
+		})
+		return
+	}
+	
+	// Сохраняем лимит слота в Redis
+	key := fmt.Sprintf("slot:%s:max_capacity", slotID)
+	
+	if err := ec.redisUtil.Set(key, fmt.Sprintf("%d", req.MaxCapacity), 0); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "failed to update slot capacity",
+		})
+		return
+	}
+	
+	// Отправляем обновление через WebSocket
+	BroadcastERPUpdate("slot_capacity_updated", map[string]interface{}{
+		"slot_id": slotID,
+		"max_capacity": req.MaxCapacity,
+		"message": "Лимит слота обновлен",
+	})
+	
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"slot_id": slotID,
+		"max_capacity": req.MaxCapacity,
+		"message": "Лимит слота обновлен",
+	})
+}
+
+// GetRevenue получает выручку за указанную дату или за сегодня
+// GET /api/v1/erp/revenue?date=2006-01-02 (опционально)
+func (ec *ERPController) GetRevenue(c *gin.Context) {
+	if ec.revenueService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Revenue service not available",
+		})
+		return
+	}
+
+	date := c.DefaultQuery("date", "")
+	revenue, err := ec.revenueService.GetRevenueForDate(date)
+	if err != nil {
+		log.Printf("❌ GetRevenue: ошибка получения выручки: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Ошибка получения выручки",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, revenue)
+}
+
+// GetDailyPlan получает план на день
+// GET /api/v1/erp/daily-plan?date=2006-01-02 (опционально)
+func (ec *ERPController) GetDailyPlan(c *gin.Context) {
+	if ec.dailyPlanService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Daily plan service not available",
+		})
+		return
+	}
+
+	date := c.DefaultQuery("date", "")
+	plan, err := ec.dailyPlanService.GetDailyPlan(date)
+	if err != nil {
+		log.Printf("❌ GetDailyPlan: ошибка получения плана: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Ошибка получения плана",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"date": date,
+		"plan": plan,
+	})
+}
+
+// SetDailyPlan устанавливает план на день
+// PUT /api/v1/erp/daily-plan
+// Body: {"date": "2006-01-02", "plan": 500000.0}
+func (ec *ERPController) SetDailyPlan(c *gin.Context) {
+	if ec.dailyPlanService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Daily plan service not available",
+		})
+		return
+	}
+
+	var req struct {
+		Date string  `json:"date"` // Опционально, по умолчанию сегодня
+		Plan float64 `json:"plan" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid request",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	if req.Plan < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "plan must be greater than or equal to 0",
+		})
+		return
+	}
+
+	err := ec.dailyPlanService.SetDailyPlan(req.Date, req.Plan)
+	if err != nil {
+		log.Printf("❌ SetDailyPlan: ошибка установки плана: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Ошибка установки плана",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"date":    req.Date,
+		"plan":    req.Plan,
+		"message": "План на день установлен",
+	})
+}
+
+// GetKitchenLoad получает загрузку кухни
+// GET /api/v1/erp/kitchen-load?window=next (window: current, next, shift)
+func (ec *ERPController) GetKitchenLoad(c *gin.Context) {
+	if ec.kitchenLoadService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Kitchen load service not available",
+		})
+		return
+	}
+
+	// По умолчанию используем "next" (оперативное управление - текущий + следующий слот)
+	window := c.DefaultQuery("window", "next")
+	
+	// Валидация window
+	validWindows := map[string]bool{
+		"current":    true,
+		"next":       true,
+		"operational": true,
+		"shift":      true,
+	}
+	if !validWindows[window] {
+		window = "next" // Fallback на оперативное управление
+	}
+
+	loadStats, err := ec.kitchenLoadService.GetKitchenLoad(window)
+	if err != nil {
+		log.Printf("❌ GetKitchenLoad: ошибка получения загрузки кухни: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Ошибка получения загрузки кухни",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, loadStats)
+}
+
+// GetRevenueForecast получает прогноз выручки на конец дня
+// GET /api/v1/erp/revenue/forecast
+func (ec *ERPController) GetRevenueForecast(c *gin.Context) {
+	if ec.revenueService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Revenue service not available",
+		})
+		return
+	}
+
+	forecast, err := ec.revenueService.GetRevenueForecast()
+	if err != nil {
+		log.Printf("❌ GetRevenueForecast: ошибка получения прогноза: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Ошибка получения прогноза выручки",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, forecast)
+}

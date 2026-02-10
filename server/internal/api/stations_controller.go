@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 	"zephyrvpn/server/internal/models"
+	"zephyrvpn/server/internal/services"
 	"zephyrvpn/server/internal/utils"
 )
 
@@ -415,6 +416,80 @@ func (sc *StationsController) DeleteStation(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Station deleted successfully",
 		"id":      id,
+	})
+}
+
+// UpdateOrderItemStatus обновляет статус позиции заказа на станции
+// PUT /api/v1/erp/stations/:id/orders/:order_id/items/:item_index
+func (sc *StationsController) UpdateOrderItemStatus(c *gin.Context) {
+	if sc.db == nil || sc.redisUtil == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Database or Redis not available",
+		})
+		return
+	}
+
+	stationID := c.Param("id") // Используем :id вместо :station_id для совместимости с другими роутами
+	orderID := c.Param("order_id")
+	itemIndexStr := c.Param("item_index")
+
+	// Парсим item_index
+	var itemIndex int
+	if _, err := fmt.Sscanf(itemIndexStr, "%d", &itemIndex); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid item_index",
+		})
+		return
+	}
+
+	// Получаем новый статус из тела запроса
+	var req struct {
+		Status string `json:"status" binding:"required"` // "preparing", "ready", "completed"
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Invalid request body",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Валидация статуса
+	validStatuses := map[string]bool{
+		"preparing": true,
+		"ready":     true,
+		"completed": true,
+	}
+	if !validStatuses[req.Status] {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("Invalid status. Allowed: preparing, ready, completed"),
+		})
+		return
+	}
+
+	// Создаем сервис для обновления статуса
+	stationAssignService := services.NewStationAssignmentService(sc.db, sc.redisUtil)
+
+	// Обновляем статус позиции
+	if err := stationAssignService.UpdateItemStatus(orderID, itemIndex, req.Status, stationID); err != nil {
+		log.Printf("❌ UpdateOrderItemStatus: ошибка обновления статуса: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to update item status",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	log.Printf("✅ UpdateOrderItemStatus: заказ %s, позиция %d, статус %s (станция: %s)", 
+		orderID, itemIndex, req.Status, stationID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "Item status updated successfully",
+		"order_id":   orderID,
+		"item_index": itemIndex,
+		"status":     req.Status,
+		"station_id": stationID,
 	})
 }
 

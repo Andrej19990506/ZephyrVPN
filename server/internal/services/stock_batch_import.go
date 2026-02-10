@@ -3,6 +3,7 @@ package services
 import (
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,11 +19,13 @@ type InvoiceItem struct {
 	BranchID       string
 	Quantity       decimal.Decimal // Количество в BaseUnit (г/мл/шт)
 	Unit           string          // Единица измерения из накладной
-	PricePerKg     decimal.Decimal // Цена за InboundUnit (кг/л/шт) - единица закупки из номенклатуры
+	PricePerUnit   decimal.Decimal // Цена за упаковку (если указан pack_size) или за InboundUnit
+	PricePerKg     decimal.Decimal // Цена за InboundUnit (кг/л/шт) - вычисленная цена за единицу после деления на pack_size
 	PricePerGram   decimal.Decimal // Цена за BaseUnit (г/мл/шт) - вычисляется через ConversionFactor из номенклатуры
 	TotalCost      decimal.Decimal // Общая стоимость: Quantity * PricePerGram
 	ExpiryAt       *time.Time
 	ConversionFactor decimal.Decimal // Коэффициент конвертации из номенклатуры (InboundUnit -> BaseUnit)
+	PackSize       decimal.Decimal   // Размер упаковки (например, 10 для "Ведро 10кг") - опционально
 }
 
 // ValidateInvoiceItem выполняет предварительную валидацию товара
@@ -77,13 +80,162 @@ func ValidateInvoiceItem(db *gorm.DB, itemData map[string]interface{}) (*Invoice
 		return nil, fmt.Errorf("quantity должен быть > 0, получено: %s", quantity.String())
 	}
 	
-	// Получаем единицу измерения
+	// Получаем единицу измерения из накладной
 	unit, ok := itemData["unit"].(string)
 	if !ok || unit == "" {
 		unit = "g" // Значение по умолчанию
 	}
 	
-	// Получаем цену за единицу (Major Unit - кг/л/шт)
+	// Загружаем данные номенклатуры ДО обработки цены, чтобы знать BaseUnit и InboundUnit
+	var nomenclature models.NomenclatureItem
+	if err := db.First(&nomenclature, "id = ?", nomenclatureID).Error; err != nil {
+		return nil, fmt.Errorf("номенклатура с ID %s не найдена: %w", nomenclatureID, err)
+	}
+	
+	// Используем InboundUnit из номенклатуры (единица измерения для закупки)
+	inboundUnit := nomenclature.InboundUnit
+	if inboundUnit == "" {
+		inboundUnit = nomenclature.BaseUnit // Fallback на BaseUnit
+	}
+	
+	baseUnit := nomenclature.BaseUnit
+	if baseUnit == "" {
+		baseUnit = "g" // Значение по умолчанию
+	}
+	
+	// КРИТИЧЕСКИ ВАЖНО: Исправляем BaseUnit, если он установлен неправильно
+	// BaseUnit должен быть минимальной единицей (г/мл), а не крупной (кг/л) для правильной работы формул
+	baseUnitNormalized := strings.ToLower(strings.TrimSpace(baseUnit))
+	inboundUnitNormalized := strings.ToLower(strings.TrimSpace(nomenclature.InboundUnit))
+	if (baseUnitNormalized == "кг" || baseUnitNormalized == "kg") && 
+	   (inboundUnitNormalized == "кг" || inboundUnitNormalized == "kg") {
+		// Если BaseUnit = "кг" и InboundUnit = "кг", исправляем BaseUnit на "г"
+		log.Printf("⚠️ ВНИМАНИЕ: BaseUnit товара '%s' установлен как 'kg', исправляем на 'g' для правильной работы формул",
+			nomenclature.Name)
+		baseUnit = "g"
+		baseUnitNormalized = "g"
+	} else if (baseUnitNormalized == "л" || baseUnitNormalized == "l") && 
+	          (inboundUnitNormalized == "л" || inboundUnitNormalized == "l") {
+		// Если BaseUnit = "л" и InboundUnit = "л", исправляем BaseUnit на "мл"
+		log.Printf("⚠️ ВНИМАНИЕ: BaseUnit товара '%s' установлен как 'l', исправляем на 'ml' для правильной работы формул",
+			nomenclature.Name)
+		baseUnit = "ml"
+		baseUnitNormalized = "ml"
+	}
+	
+	// ВАЖНО: Конвертируем quantity в BaseUnit (граммы/мл/шт)
+	// КРИТИЧЕСКИ ВАЖНО: Если BaseUnit = "g" или "ml", ВСЕГДА конвертируем в граммы/миллилитры
+	// независимо от того, что ввел пользователь (кг/л или граммы/мл)
+	// Если пользователь ввел 10 кг, а BaseUnit = "g", то quantity = 10000 г
+	quantityInBaseUnit := quantity
+	
+	// Нормализуем единицы для сравнения (кг/КГ -> kg, г/Г -> g, л/Л -> l, мл/МЛ -> ml)
+	unitNormalized := strings.ToLower(strings.TrimSpace(unit))
+	if unitNormalized == "кг" || unitNormalized == "килограмм" {
+		unitNormalized = "kg"
+	} else if unitNormalized == "г" || unitNormalized == "грамм" {
+		unitNormalized = "g"
+	} else if unitNormalized == "л" || unitNormalized == "литр" {
+		unitNormalized = "l"
+	} else if unitNormalized == "мл" || unitNormalized == "миллилитр" {
+		unitNormalized = "ml"
+	}
+	
+	// baseUnitNormalized уже вычислен и исправлен выше
+	
+	// КРИТИЧЕСКИ ВАЖНО: Если BaseUnit = "g", ВСЕГДА конвертируем в граммы
+	// Если BaseUnit = "ml", ВСЕГДА конвертируем в миллилитры
+	if baseUnitNormalized == "g" {
+		// BaseUnit = граммы - конвертируем все в граммы
+		if unitNormalized == "kg" || unit == "кг" || unit == "КГ" {
+			quantityInBaseUnit = quantity.Mul(decimal.NewFromInt(1000)) // кг -> г
+		} else if unitNormalized == "g" || unit == "г" || unit == "Г" {
+			// Уже в граммах, конвертация не нужна
+			quantityInBaseUnit = quantity
+		} else {
+			// Используем conversion_factor если он указан
+			conversionFactor := decimal.NewFromFloat(nomenclature.ConversionFactor)
+			if conversionFactor.GreaterThan(decimal.Zero) && conversionFactor.GreaterThan(decimal.NewFromInt(1)) {
+				quantityInBaseUnit = quantity.Mul(conversionFactor)
+			} else {
+				// Если conversion_factor не указан или = 1, оставляем как есть
+				quantityInBaseUnit = quantity
+			}
+		}
+	} else if baseUnitNormalized == "ml" {
+		// BaseUnit = миллилитры - конвертируем все в миллилитры
+		if unitNormalized == "l" || unit == "л" || unit == "Л" {
+			quantityInBaseUnit = quantity.Mul(decimal.NewFromInt(1000)) // л -> мл
+		} else if unitNormalized == "ml" || unit == "мл" || unit == "МЛ" {
+			// Уже в миллилитрах, конвертация не нужна
+			quantityInBaseUnit = quantity
+		} else {
+			// Используем conversion_factor если он указан
+			conversionFactor := decimal.NewFromFloat(nomenclature.ConversionFactor)
+			if conversionFactor.GreaterThan(decimal.Zero) && conversionFactor.GreaterThan(decimal.NewFromInt(1)) {
+				quantityInBaseUnit = quantity.Mul(conversionFactor)
+			} else {
+				// Если conversion_factor не указан или = 1, оставляем как есть
+				quantityInBaseUnit = quantity
+			}
+		}
+	} else if baseUnitNormalized == "kg" {
+		// BaseUnit = килограммы - конвертируем в килограммы
+		if unitNormalized == "g" || unit == "г" || unit == "Г" {
+			quantityInBaseUnit = quantity.Div(decimal.NewFromInt(1000)) // г -> кг
+		} else if unitNormalized == "kg" || unit == "кг" || unit == "КГ" {
+			// Уже в килограммах, конвертация не нужна
+			quantityInBaseUnit = quantity
+		} else {
+			// Используем conversion_factor если он указан
+			conversionFactor := decimal.NewFromFloat(nomenclature.ConversionFactor)
+			if conversionFactor.GreaterThan(decimal.Zero) && conversionFactor.GreaterThan(decimal.NewFromInt(1)) {
+				quantityInBaseUnit = quantity.Div(conversionFactor)
+			} else {
+				quantityInBaseUnit = quantity
+			}
+		}
+	} else if baseUnitNormalized == "l" {
+		// BaseUnit = литры - конвертируем в литры
+		if unitNormalized == "ml" || unit == "мл" || unit == "МЛ" {
+			quantityInBaseUnit = quantity.Div(decimal.NewFromInt(1000)) // мл -> л
+		} else if unitNormalized == "l" || unit == "л" || unit == "Л" {
+			// Уже в литрах, конвертация не нужна
+			quantityInBaseUnit = quantity
+		} else {
+			// Используем conversion_factor если он указан
+			conversionFactor := decimal.NewFromFloat(nomenclature.ConversionFactor)
+			if conversionFactor.GreaterThan(decimal.Zero) && conversionFactor.GreaterThan(decimal.NewFromInt(1)) {
+				quantityInBaseUnit = quantity.Div(conversionFactor)
+			} else {
+				quantityInBaseUnit = quantity
+			}
+		}
+	} else {
+		// Для других единиц (шт, box и т.д.) используем conversion_factor или оставляем как есть
+		if unitNormalized != baseUnitNormalized {
+			conversionFactor := decimal.NewFromFloat(nomenclature.ConversionFactor)
+			if conversionFactor.GreaterThan(decimal.Zero) && conversionFactor.GreaterThan(decimal.NewFromInt(1)) {
+				// Определяем направление конвертации
+				if baseUnitNormalized == "g" && (unitNormalized == "kg" || unit == "кг" || unit == "КГ") {
+					quantityInBaseUnit = quantity.Mul(conversionFactor)
+				} else if baseUnitNormalized == "ml" && (unitNormalized == "l" || unit == "л" || unit == "Л") {
+					quantityInBaseUnit = quantity.Mul(conversionFactor)
+				} else {
+					quantityInBaseUnit = quantity.Div(conversionFactor)
+				}
+			} else {
+				quantityInBaseUnit = quantity
+			}
+		} else {
+			quantityInBaseUnit = quantity
+		}
+	}
+	
+	log.Printf("🔄 Конвертация количества: %.2f %s -> %.2f %s (BaseUnit=%s)", 
+		quantity.InexactFloat64(), unit, quantityInBaseUnit.InexactFloat64(), baseUnit, baseUnit)
+	
+	// Получаем цену за упаковку (или за единицу, если pack_size не указан)
 	var pricePerUnit decimal.Decimal
 	if priceVal, ok := itemData["price_per_unit"]; ok {
 		switch v := priceVal.(type) {
@@ -111,36 +263,73 @@ func ValidateInvoiceItem(db *gorm.DB, itemData map[string]interface{}) (*Invoice
 		return nil, fmt.Errorf("price_per_unit должен быть > 0, получено: %s", pricePerUnit.String())
 	}
 	
-	// Загружаем данные номенклатуры для получения InboundUnit и ConversionFactor
-	var nomenclature models.NomenclatureItem
-	if err := db.First(&nomenclature, "id = ?", nomenclatureID).Error; err != nil {
-		return nil, fmt.Errorf("номенклатура с ID %s не найдена: %w", nomenclatureID, err)
-	}
-	
-	// Используем InboundUnit из номенклатуры (единица измерения для закупки)
-	inboundUnit := nomenclature.InboundUnit
-	if inboundUnit == "" {
-		inboundUnit = nomenclature.BaseUnit // Fallback на BaseUnit
-	}
-	
 	// Получаем коэффициент конвертации из номенклатуры
 	conversionFactor := decimal.NewFromFloat(nomenclature.ConversionFactor)
 	if conversionFactor.LessThanOrEqual(decimal.Zero) {
 		conversionFactor = decimal.NewFromInt(1) // По умолчанию 1, если не указан
 	}
 	
-	// Вычисляем цену за Base Unit (грамм/миллилитр)
-	// Если InboundUnit != BaseUnit, нужно конвертировать цену
-	// Например: цена 100₽ за кг (InboundUnit), BaseUnit = g, ConversionFactor = 1000
-	// Тогда цена за грамм = 100 / 1000 = 0.1₽
-	pricePerBaseUnit := pricePerUnit
-	if nomenclature.BaseUnit != inboundUnit && conversionFactor.GreaterThan(decimal.NewFromInt(1)) {
-		// Цена указана за InboundUnit (кг/л), конвертируем в BaseUnit (г/мл)
-		pricePerBaseUnit = pricePerUnit.Div(conversionFactor)
+	// Получаем размер упаковки (pack_size) - опционально
+	// ВАЖНО: pack_size должен быть в единицах InboundUnit (кг/л/шт)
+	// Пример: "Ведро 10кг" -> pack_size = 10 (кг), не 10000 (г)
+	// Если указан, то price_per_unit - это цена за упаковку, и нужно разделить на pack_size
+	var packSize decimal.Decimal
+	if packSizeVal, ok := itemData["pack_size"]; ok && packSizeVal != nil {
+		switch v := packSizeVal.(type) {
+		case float64:
+			packSize = decimal.NewFromFloat(v)
+		case int:
+			packSize = decimal.NewFromInt(int64(v))
+		case int64:
+			packSize = decimal.NewFromInt(v)
+		case string:
+			var err error
+			packSize, err = decimal.NewFromString(v)
+			if err != nil {
+				return nil, fmt.Errorf("неверный формат pack_size: %v", v)
+			}
+		default:
+			// Игнорируем неверный тип, pack_size опционален
+		}
+		
+		// Валидация: если pack_size указан, он должен быть > 0
+		if packSize.GreaterThan(decimal.Zero) {
+			// pack_size валиден, будет использован для нормализации цены
+		} else if packSize.LessThan(decimal.Zero) {
+			// Отрицательный pack_size недопустим
+			return nil, fmt.Errorf("pack_size не может быть отрицательным, получено: %s", packSize.String())
+		}
+		// Если packSize = 0, это нормально - pack_size опционален
 	}
 	
-	// Вычисляем общую стоимость: Total_Cost = Quantity_In_BaseUnit * Price_Per_BaseUnit
-	totalCost := quantity.Mul(pricePerBaseUnit)
+	// ВАЖНО: Нормализация цены - вычисляем цену за 1 базовую единицу измерения (кг/л/шт)
+	// Формула: CostPerUnit (за кг/л) = Сумма_за_упаковку / Вес_упаковки_в_кг
+	// Пример: "Ведро 10кг" за 1221₽ -> pricePerUnit = 1221, packSize = 10 -> pricePerInboundUnit = 1221 / 10 = 122.1₽/кг
+	// В StockBatch.cost_per_unit сохраняется цена за единицу (122.1), а не за упаковку (1221)
+	pricePerInboundUnit := pricePerUnit
+	if packSize.GreaterThan(decimal.Zero) {
+		pricePerInboundUnit = pricePerUnit.Div(packSize)
+		log.Printf("📦 Нормализация цены: цена за упаковку %.2f₽ / размер упаковки %.2f %s = цена за единицу %.2f₽/%s",
+			pricePerUnit.InexactFloat64(), packSize.InexactFloat64(), inboundUnit, pricePerInboundUnit.InexactFloat64(), inboundUnit)
+	}
+	
+	// ВАЖНО: Расчет общей стоимости используя shopspring/decimal для точности
+	// Формула: TotalCost = (QuantityInBaseUnit / ConversionFactor) * PricePerInboundUnit
+	// Пример: 10000г / 1000 * 122.1₽/кг = 10кг * 122.1₽/кг = 1221₽
+	// Сначала конвертируем quantity в единицы цены (InboundUnit), затем умножаем на цену
+	var quantityInInboundUnit decimal.Decimal
+	if conversionFactor.GreaterThan(decimal.NewFromInt(1)) {
+		quantityInInboundUnit = quantityInBaseUnit.Div(conversionFactor)
+	} else {
+		quantityInInboundUnit = quantityInBaseUnit
+	}
+	totalCost := quantityInInboundUnit.Mul(pricePerInboundUnit)
+	
+	// PricePerGram вычисляется только для справки (не сохраняется в батче)
+	pricePerBaseUnit := pricePerInboundUnit
+	if nomenclature.BaseUnit != inboundUnit && conversionFactor.GreaterThan(decimal.NewFromInt(1)) {
+		pricePerBaseUnit = pricePerInboundUnit.Div(conversionFactor)
+	}
 	
 	// Обрабатываем expiry_date
 	var expiryAt *time.Time
@@ -152,17 +341,19 @@ func ValidateInvoiceItem(db *gorm.DB, itemData map[string]interface{}) (*Invoice
 		}
 	}
 	
-	return &InvoiceItem{
-		NomenclatureID:  nomenclatureID,
-		BranchID:        branchID,
-		Quantity:        quantity,
-		Unit:            unit,
-		PricePerKg:      pricePerUnit,      // Цена за InboundUnit (кг/л/шт)
-		PricePerGram:    pricePerBaseUnit,  // Цена за BaseUnit (г/мл/шт)
-		TotalCost:       totalCost,
-		ExpiryAt:        expiryAt,
-		ConversionFactor: conversionFactor,
-	}, nil
+		return &InvoiceItem{
+			NomenclatureID:  nomenclatureID,
+			BranchID:        branchID,
+			Quantity:        quantityInBaseUnit, // Количество в BaseUnit (г/мл/шт) - конвертировано из unit
+			Unit:            baseUnit,           // Единица измерения в BaseUnit
+			PricePerUnit:    pricePerUnit,       // Цена за упаковку (если указан pack_size) или за InboundUnit
+			PricePerKg:      pricePerInboundUnit, // Цена за InboundUnit (кг/л/шт) - нормализованная цена за единицу
+			PricePerGram:    pricePerBaseUnit,   // Цена за BaseUnit (г/мл/шт) - вычисляется через ConversionFactor
+			TotalCost:       totalCost,          // Общая стоимость: (QuantityInBaseUnit / ConversionFactor) * PricePerInboundUnit
+			ExpiryAt:        expiryAt,
+			ConversionFactor: conversionFactor,
+			PackSize:        packSize,           // Размер упаковки в InboundUnit (опционально)
+		}, nil
 }
 
 // ProcessInboundInvoiceBatch обрабатывает входящую накладную с использованием батч-вставки
@@ -199,7 +390,7 @@ func (s *StockService) ProcessInboundInvoiceBatch(invoiceID string, items []map[
 		}
 	}()
 	
-	// Шаг 3: Создаем Invoice (Source of Truth)
+	// Шаг 3: Создаем или обновляем Invoice (Source of Truth)
 	// Генерируем invoiceID если не передан или невалидный
 	var invoiceUUID string
 	if invoiceID != "" {
@@ -224,32 +415,57 @@ func (s *StockService) ProcessInboundInvoiceBatch(invoiceID string, items []map[
 		}
 	}
 	
-	// Генерируем номер накладной (если не передан)
-	invoiceNumber := invoiceID
-	if invoiceNumber == "" || invoiceNumber == invoiceUUID {
-		invoiceNumber = fmt.Sprintf("INV-%s", time.Now().Format("20060102-150405"))
-	}
+	// Проверяем, существует ли накладная (черновик)
+	var existingInvoice models.Invoice
+	invoiceExists := tx.Where("id = ?", invoiceUUID).First(&existingInvoice).Error == nil
 	
-	// Создаем Invoice запись
-	invoice := &models.Invoice{
-		ID:            invoiceUUID,
-		Number:        invoiceNumber,
-		CounterpartyID: &counterpartyID,
-		TotalAmount:   totalAmount,
-		Status:        models.InvoiceStatusCompleted,
-		BranchID:      branchID,
-		InvoiceDate:   parsedInvoiceDate,
-		IsPaidCash:    isPaidCash,
-		PerformedBy:   performedBy,
-		Notes:         fmt.Sprintf("Оприходование %d товаров", len(validatedItems)),
-	}
+	// Определяем номер накладной (будет использован везде)
+	var invoiceNumber string
+	var invoice *models.Invoice
 	
-	if err := tx.Create(invoice).Error; err != nil {
-		tx.Rollback()
-		return fmt.Errorf("ошибка создания накладной: %w", err)
+	if invoiceExists {
+		// Обновляем существующую накладную (черновик) - меняем статус на Completed
+		invoiceNumber = existingInvoice.Number // Используем существующий номер
+		existingInvoice.Status = models.InvoiceStatusCompleted
+		existingInvoice.TotalAmount = totalAmount
+		existingInvoice.IsPaidCash = isPaidCash
+		existingInvoice.PerformedBy = performedBy
+		if counterpartyID != "" {
+			existingInvoice.CounterpartyID = &counterpartyID
+		}
+		existingInvoice.Notes = fmt.Sprintf("Оприходование %d товаров", len(validatedItems))
+		if err := tx.Save(&existingInvoice).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("ошибка обновления накладной: %w", err)
+		}
+		invoice = &existingInvoice
+		log.Printf("✅ Обновлена накладная (черновик → завершена): ID=%s, номер=%s", invoiceUUID, invoiceNumber)
+	} else {
+		// Создаем новую накладную
+		invoiceNumber = invoiceID
+		if invoiceNumber == "" || invoiceNumber == invoiceUUID {
+			invoiceNumber = fmt.Sprintf("INV-%s", time.Now().Format("20060102-150405"))
+		}
+		
+		invoice = &models.Invoice{
+			ID:            invoiceUUID,
+			Number:        invoiceNumber,
+			CounterpartyID: &counterpartyID,
+			TotalAmount:   totalAmount,
+			Status:        models.InvoiceStatusCompleted,
+			BranchID:      branchID,
+			InvoiceDate:   parsedInvoiceDate,
+			IsPaidCash:    isPaidCash,
+			PerformedBy:   performedBy,
+			Notes:         fmt.Sprintf("Оприходование %d товаров", len(validatedItems)),
+		}
+		
+		if err := tx.Create(invoice).Error; err != nil {
+			tx.Rollback()
+			return fmt.Errorf("ошибка создания накладной: %w", err)
+		}
+		log.Printf("✅ Создана новая накладная: ID=%s, номер=%s, сумма=%.2f", invoiceUUID, invoiceNumber, totalAmount)
 	}
-	
-	log.Printf("✅ Создана накладная %s (ID: %s, сумма: %.2f)", invoiceNumber, invoiceUUID, totalAmount)
 	
 	// Шаг 4: Подготавливаем данные для батч-вставки
 	// Разбиваем на чанки по 1500 строк (безопасно для PostgreSQL параметров)
@@ -263,19 +479,58 @@ func (s *StockService) ProcessInboundInvoiceBatch(invoiceID string, items []map[
 		// Генерируем UUID для партии
 		batchID := uuid.New().String()
 		
+		// Загружаем номенклатуру для логирования
+		var nomenclature models.NomenclatureItem
+		if err := s.db.First(&nomenclature, "id = ?", item.NomenclatureID).Error; err == nil {
+			// Логирование для отладки
+			costPerUnitValue := item.PricePerKg.InexactFloat64()
+			quantityValue := item.Quantity.InexactFloat64()
+			conversionFactorValue := item.ConversionFactor.InexactFloat64()
+			
+			// Правильный расчет ожидаемой стоимости с учетом conversionFactor
+			// Формула: (QuantityInBaseUnit * CostPerInboundUnit) / ConversionFactor
+			var expectedCost float64
+			if conversionFactorValue > 1 {
+				expectedCost = (quantityValue * costPerUnitValue) / conversionFactorValue
+			} else {
+				expectedCost = quantityValue * costPerUnitValue
+			}
+			
+			log.Printf("💾 Сохранение StockBatch для товара '%s' (ID: %s):", nomenclature.Name, item.NomenclatureID)
+			log.Printf("   Quantity (BaseUnit): %.2f %s", quantityValue, item.Unit)
+			log.Printf("   CostPerUnit (InboundUnit): %.2f₽/%s (цена за 1кг/1л, НЕ за грамм!)", 
+				costPerUnitValue, nomenclature.InboundUnit)
+			if conversionFactorValue > 1 {
+				log.Printf("   Ожидаемая стоимость при чтении: (%.2f * %.2f) / %.0f = %.2f₽", 
+					quantityValue, costPerUnitValue, conversionFactorValue, expectedCost)
+			} else {
+				log.Printf("   Ожидаемая стоимость при чтении: %.2f * %.2f = %.2f₽", 
+					quantityValue, costPerUnitValue, expectedCost)
+			}
+		}
+		
 		// Создаем StockBatch с FK на Invoice
-		// CostPerUnit сохраняется как цена за BaseUnit (г/мл/шт) для корректного расчета стоимости остатков
+		// КРИТИЧЕСКИ ВАЖНО: CostPerUnit должен быть ценой за 1кг/1л, НЕ за грамм!
+		// Если указан pack_size, цена нормализуется: pricePerInboundUnit = pricePerUnit / packSize
+		// Пример: "Ведро 10кг" за 1,221₽ -> pack_size=10 -> CostPerUnit = 1221/10 = 122.1₽/кг
+		// Если pack_size не указан, то CostPerUnit = price_per_unit (цена уже за единицу)
+		// 
+		// Количество сохраняется в BaseUnit (граммы): 10кг = 10000г
+		// 
+		// Формула расчета стоимости при чтении:
+		// TotalValue = (RemainingQuantityInGrams * CostPerKg) / 1000
+		// Пример: (10000г * 122.1₽/кг) / 1000 = 1,221₽
 		batch := models.StockBatch{
 			ID:                batchID,
 			NomenclatureID:    item.NomenclatureID,
 			BranchID:          item.BranchID,
 			Quantity:          item.Quantity.InexactFloat64(), // Количество в BaseUnit (г/мл/шт)
 			Unit:              item.Unit,
-			CostPerUnit:       item.PricePerGram.InexactFloat64(), // Цена за BaseUnit (из номенклатуры: InboundUnit -> BaseUnit через ConversionFactor)
+			CostPerUnit:       item.PricePerKg.InexactFloat64(), // Цена за InboundUnit (кг/л/шт) - цена за 1кг/1л!
 			ExpiryAt:          item.ExpiryAt,
 			Source:            "invoice",
 			InvoiceID:         &invoiceUUID, // FK на Invoice (Source of Truth)
-			RemainingQuantity: item.Quantity.InexactFloat64(),
+			RemainingQuantity: item.Quantity.InexactFloat64(), // Остаток в BaseUnit (г/мл/шт)
 			CreatedAt:         now,
 			UpdatedAt:         now,
 		}
@@ -418,5 +673,6 @@ func (s *StockService) ProcessInboundInvoiceBatch(invoiceID string, items []map[
 	
 	return nil
 }
+
 
 

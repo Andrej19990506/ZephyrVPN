@@ -101,3 +101,42 @@ func (s *CounterpartyService) UpdateCounterpartyBalance(counterpartyID string, a
 	return nil
 }
 
+// GetCounterpartyByINN получает контрагента по ИНН
+func (s *CounterpartyService) GetCounterpartyByINN(inn string) (*models.Counterparty, error) {
+	var counterparty models.Counterparty
+	if err := s.db.Where("inn = ?", inn).First(&counterparty).Error; err != nil {
+		return nil, err
+	}
+	return &counterparty, nil
+}
+
+// CheckINNDuplicate проверяет, существует ли контрагент с таким ИНН
+func (s *CounterpartyService) CheckINNDuplicate(inn string) (bool, error) {
+	if inn == "" {
+		return false, nil
+	}
+	var existing models.Counterparty
+	if err := s.db.Where("inn = ?", inn).First(&existing).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return false, nil // ИНН не найден, дубликата нет
+		}
+		return false, err
+	}
+	return true, nil // ИНН найден, есть дубликат
+}
+
+// CreateInvoice создает счет для контрагента
+func (s *CounterpartyService) CreateInvoice(invoice *models.Invoice) error {
+	// Проверяем, существует ли контрагент
+	if invoice.CounterpartyID != nil && *invoice.CounterpartyID != "" {
+		_, err := s.GetCounterpartyByID(*invoice.CounterpartyID)
+		if err != nil {
+			return fmt.Errorf("контрагент не найден: %v", err)
+		}
+	}
+
+	if err := s.db.Create(invoice).Error; err != nil {
+		return err
+	}
+	return nil
+}

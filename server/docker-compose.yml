@@ -13,6 +13,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d
+    networks:
+      - redis-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pizza_admin -d pizza_db"]
@@ -30,19 +32,206 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - redis-network
     restart: unless-stopped
 
-  redis:
+  # ============================================
+  # Redis Master (для максимальной производительности)
+  # ============================================
+  redis-master:
     image: redis:7-alpine
-    container_name: zephyrvpn_redis
-    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "4gb", "--maxmemory-policy", "allkeys-lru"]
+    container_name: zephyrvpn_redis_master
+    command: >
+      redis-server
+      --port 6379
+      --save ""
+      --appendonly no
+      --maxmemory 2gb
+      --maxmemory-policy allkeys-lru
+      --protected-mode no
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
+      - redis_master_data:/data
+    networks:
+      - redis-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2.5G
+
+  # ============================================
+  # Redis Replica 1 (с персистентностью)
+  # ============================================
+  redis-replica-1:
+    image: redis:7-alpine
+    container_name: zephyrvpn_redis_replica_1
+    command: >
+      redis-server
+      --port 6379
+      --replicaof redis-master 6379
+      --appendonly yes
+      --appendfsync everysec
+      --save 60 1
+      --maxmemory 2gb
+      --maxmemory-policy allkeys-lru
+      --protected-mode no
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    volumes:
+      - redis_replica_1_data:/data
+    networks:
+      - redis-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2.5G
+
+  # ============================================
+  # Redis Replica 2 (с персистентностью)
+  # ============================================
+  redis-replica-2:
+    image: redis:7-alpine
+    container_name: zephyrvpn_redis_replica_2
+    command: >
+      redis-server
+      --port 6379
+      --replicaof redis-master 6379
+      --appendonly yes
+      --appendfsync everysec
+      --save 60 1
+      --maxmemory 2gb
+      --maxmemory-policy allkeys-lru
+      --protected-mode no
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    volumes:
+      - redis_replica_2_data:/data
+    networks:
+      - redis-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2.5G
+
+  # ============================================
+  # Redis Sentinel 1
+  # ============================================
+
+
+  redis-sentinel-1:
+    image: redis:7-alpine
+    container_name: zephyrvpn_redis_sentinel_1
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "if [ ! -f /data/sentinel.conf ]; then 
+        cp /etc/redis/sentinel.conf /data/sentinel.conf
+      fi && 
+      redis-sentinel /data/sentinel.conf"
+    ports:
+      - "26379:26379"
+    volumes:
+      - ./redis-sentinel.conf:/etc/redis/sentinel.conf:ro
+      - redis_sentinel_1_data:/data
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica-1:
+        condition: service_healthy
+      redis-replica-2:
+        condition: service_healthy
+    networks:
+      - redis-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "sentinel", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ============================================
+  # Redis Sentinel 2
+  # ============================================
+  redis-sentinel-2:
+    image: redis:7-alpine
+    container_name: zephyrvpn_redis_sentinel_2
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "if [ ! -f /data/sentinel.conf ]; then 
+        cp /etc/redis/sentinel.conf /data/sentinel.conf
+      fi && 
+      redis-sentinel /data/sentinel.conf"
+    ports:
+      - "26380:26379"
+    volumes:
+      - ./redis-sentinel.conf:/etc/redis/sentinel.conf:ro
+      - redis_sentinel_2_data:/data
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica-1:
+        condition: service_healthy
+      redis-replica-2:
+        condition: service_healthy
+    networks:
+      - redis-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "sentinel", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ============================================
+  # Redis Sentinel 3
+  # ============================================
+  redis-sentinel-3:
+    image: redis:7-alpine
+    container_name: zephyrvpn_redis_sentinel_3
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "if [ ! -f /data/sentinel.conf ]; then 
+        cp /etc/redis/sentinel.conf /data/sentinel.conf
+      fi && 
+      redis-sentinel /data/sentinel.conf"
+    ports:
+      - "26381:26379"
+    volumes:
+      - ./redis-sentinel.conf:/etc/redis/sentinel.conf:ro
+      - redis_sentinel_3_data:/data
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica-1:
+        condition: service_healthy
+      redis-replica-2:
+        condition: service_healthy
+    networks:
+      - redis-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "sentinel", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -53,24 +242,41 @@ services:
     ports:
       - "8080:8080"
       - "50051:50051"
+    env_file:
+      - .env
     environment:
       PORT: 8080
       ENV: production
       # Рабочие часы в UTC (клиент сам конвертирует в свой часовой пояс)
-      # 2:00 UTC = 9:00 KRAT (UTC+7), 16:45 UTC = 23:45 KRAT (UTC+7)
-      BUSINESS_OPEN_HOUR: 2
-      BUSINESS_CLOSE_HOUR: 16
-      BUSINESS_CLOSE_MIN: 45
+      # Круглосуточно для теста: 00:00 - 23:59 UTC
+      BUSINESS_OPEN_HOUR: 0
+      BUSINESS_OPEN_MIN: 0
+      BUSINESS_CLOSE_HOUR: 23
+      BUSINESS_CLOSE_MIN: 59
       DATABASE_URL: postgres://pizza_admin:pizza_secure_pass_2024@postgres:5432/pizza_db?sslmode=disable
-      REDIS_URL: redis:6379
+      # ВАЖНО: Используем Sentinel для подключения к Redis
+      REDIS_SENTINEL_ADDRS: redis-sentinel-1:26379,redis-sentinel-2:26379,redis-sentinel-3:26379
+      REDIS_MASTER_NAME: mymaster
+      # Fallback на прямой URL для обратной совместимости
+      REDIS_URL: redis://redis-master:6379/0
       KAFKA_BROKERS: kafka:29092
+      # Nixtla AI для прогнозирования выручки (опционально)
+      NIXTLA_API_KEY: nixak-vTPjRYnfj65Zi63Ym1oMlXgwC95YEXfsBR4VD85JF5M297fEF6Il3GvkpzH5VeEukEGAo26rPzbiMKR5
+      # Погода для улучшения прогноза выручки (опционально, можно переопределить через .env)
+      WEATHER_LATITUDE: ${WEATHER_LATITUDE:-56.0184}
+      WEATHER_LONGITUDE: ${WEATHER_LONGITUDE:-92.8672}
+      WEATHER_TIMEZONE: ${WEATHER_TIMEZONE:-Asia/Krasnoyarsk}
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
+      redis-master:
+        condition: service_healthy
+      redis-sentinel-1:
         condition: service_healthy
       kafka:
         condition: service_healthy
+    networks:
+      - redis-network
     deploy:
       resources:
         limits:
@@ -81,18 +287,21 @@ services:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: zephyrvpn_zookeeper
     environment:
+      ZOOKEEPER_LOG4J_PROP: "WARN,CONSOLE"
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - redis-network
     deploy:
       resources:
         limits:
           memory: 512M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "2181"]
-      interval: 10s
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 30s
       timeout: 5s
-      retries: 5
+      retries: 3
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -112,6 +321,8 @@ services:
     depends_on:
       zookeeper:
         condition: service_healthy
+    networks:
+      - redis-network
     deploy:
       resources:
         limits:
@@ -123,6 +334,21 @@ services:
       timeout: 5s
       retries: 10
 
+# ============================================
+# Volumes
+# ============================================
 volumes:
   postgres_data:
-  redis_data:
+  redis_master_data:
+  redis_replica_1_data:
+  redis_replica_2_data:
+  redis_sentinel_1_data:
+  redis_sentinel_2_data:
+  redis_sentinel_3_data:
+
+# ============================================
+# Networks
+# ============================================
+networks:
+  redis-network:
+    driver: bridge

@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/segmentio/kafka-go"
+	"gorm.io/gorm"
 	"google.golang.org/protobuf/proto"
 	"zephyrvpn/server/internal/models"
 	"zephyrvpn/server/internal/pb" // Наш сгенерированный код
@@ -22,11 +23,12 @@ type OrderGRPCServer struct {
 	pb.UnimplementedOrderServiceServer
 	redisUtil     *utils.RedisClient
 	slotService   *services.SlotService
+	orderService  *services.OrderService // Для сохранения в PostgreSQL
 	kafkaWriter   *kafka.Writer
 	kafkaSentCount int64 // Счетчик отправленных сообщений
 }
 
-func NewOrderGRPCServer(redisUtil *utils.RedisClient, kafkaBrokers string, openHour, closeHour, closeMin int, username, password, caCert string) *OrderGRPCServer {
+func NewOrderGRPCServer(redisUtil *utils.RedisClient, kafkaBrokers string, db interface{}, openHour, openMin, closeHour, closeMin int, username, password, caCert string, orderService *services.OrderService) *OrderGRPCServer {
 	var kafkaWriter *kafka.Writer
 	if kafkaBrokers != "" {
 		// Создаем dialer с SASL/PLAIN и TLS если нужно
@@ -50,11 +52,19 @@ func NewOrderGRPCServer(redisUtil *utils.RedisClient, kafkaBrokers string, openH
 		log.Println("⚠️ Kafka producer НЕ создан: KAFKA_BROKERS не установлен")
 	}
 
-	slotService := services.NewSlotService(redisUtil, openHour, closeHour, closeMin)
+	// Преобразуем db в *gorm.DB если возможно
+	var gormDB *gorm.DB
+	if db != nil {
+		if gdb, ok := db.(*gorm.DB); ok {
+			gormDB = gdb
+		}
+	}
+	slotService := services.NewSlotService(redisUtil, gormDB, openHour, openMin, closeHour, closeMin)
 	
 	return &OrderGRPCServer{
 		redisUtil:   redisUtil,
 		slotService: slotService,
+		orderService: orderService,
 		kafkaWriter: kafkaWriter,
 	}
 }
@@ -117,26 +127,31 @@ func (s *OrderGRPCServer) CreateOrder(ctx context.Context, req *pb.PizzaOrderReq
 		}
 	} else if req.PizzaName != "" {
 		// 2. Если это просто одиночная пицца
-		// Вычисляем цену из меню
-		itemPrice := int64(500) // Базовая цена по умолчанию
+		// Вычисляем цену ОДНОЙ пиццы из меню (БЕЗ умножения на quantity)
+		pizzaPricePerUnit := int64(500) // Базовая цена по умолчанию
 		if pizza, exists := models.GetPizza(req.PizzaName); exists {
-			itemPrice = int64(pizza.Price)
+			pizzaPricePerUnit = int64(pizza.Price)
 		}
 		
-		// Добавляем стоимость допов
+		// Вычисляем стоимость допов (тоже за единицу)
+		extrasPricePerUnit := int64(0)
 		for _, extraName := range req.Extras {
 			if extra, exists := models.GetExtra(extraName); exists {
-				itemPrice += int64(extra.Price)
+				extrasPricePerUnit += int64(extra.Price)
 			}
 		}
 		
-		// Умножаем на количество
+		// Общая цена за единицу (пицца + допы)
+		itemPricePerUnit := pizzaPricePerUnit + extrasPricePerUnit
+		
+		// Получаем количество
 		quantity := int32(1)
 		if req.Quantity > 0 {
 			quantity = req.Quantity
 		}
-		itemPrice = itemPrice * int64(quantity)
-		totalPrice = itemPrice
+		
+		// ВАЖНО: totalPrice = цена за единицу * количество
+		totalPrice = itemPricePerUnit * int64(quantity)
 		
 		// Получаем ингредиенты из меню или из запроса
 		ingredients := req.Ingredients
@@ -146,10 +161,11 @@ func (s *OrderGRPCServer) CreateOrder(ctx context.Context, req *pb.PizzaOrderReq
 			}
 		}
 		
-		// Конвертируем int64 в int32 для protobuf
-		itemPriceInt32 := int32(itemPrice)
-		if itemPrice > int64(^uint32(0)>>1) { // Проверка на переполнение
-			itemPriceInt32 = int32(^uint32(0) >> 1) // Максимальное значение int32
+		// Конвертируем цену ЗА ЕДИНИЦУ в int32 для protobuf
+		// ВАЖНО: В PizzaItem.Price должна быть цена ЗА ОДНУ пиццу, а не общая!
+		itemPricePerUnitInt32 := int32(itemPricePerUnit)
+		if itemPricePerUnit > int64(^uint32(0)>>1) { // Проверка на переполнение
+			itemPricePerUnitInt32 = int32(^uint32(0) >> 1) // Максимальное значение int32
 		}
 		
 		// Берем дозировки ингредиентов из модели пиццы
@@ -165,7 +181,7 @@ func (s *OrderGRPCServer) CreateOrder(ctx context.Context, req *pb.PizzaOrderReq
 		pbItems = append(pbItems, &pb.PizzaItem{
 			PizzaName:         req.PizzaName,
 			Quantity:         quantity,
-			Price:            itemPriceInt32,
+			Price:            itemPricePerUnitInt32, // Цена ЗА ОДНУ пиццу, не общая!
 			Ingredients:      ingredients,
 			IngredientAmounts: ingredientAmounts,
 			Extras:           req.Extras,
@@ -179,6 +195,14 @@ func (s *OrderGRPCServer) CreateOrder(ctx context.Context, req *pb.PizzaOrderReq
 		totalPriceInt32 = int32(^uint32(0) >> 1) // Максимальное значение int32
 	}
 
+	// Рассчитываем скидку (для gRPC пока нет скидок, но оставляем структуру)
+	discountAmount := int32(0)
+	discountPercent := int32(0)
+	// TODO: добавить поддержку скидок в gRPC запросе
+	
+	// Итоговая цена: товары + доставка - скидка (для gRPC доставка = 0)
+	finalPrice := totalPriceInt32 - discountAmount
+
 	// 🎯 Capacity-Based Slot Scheduling: назначаем слот ПЕРЕД созданием заказа
 	// Считаем общее количество элементов (пицц) в заказе
 	itemsCount := 0
@@ -186,7 +210,7 @@ func (s *OrderGRPCServer) CreateOrder(ctx context.Context, req *pb.PizzaOrderReq
 		itemsCount += int(item.Quantity)
 	}
 	
-	slotID, slotStartTime, visibleAt, err := s.slotService.AssignSlot(fullID, int(totalPrice), itemsCount)
+	slotID, slotStartTime, visibleAt, err := s.slotService.AssignSlot(fullID, int(finalPrice), itemsCount)
 	if err != nil {
 		// Если не удалось назначить слот, возвращаем ошибку
 		log.Printf("❌ OrderGRPCServer: не удалось назначить слот для заказа %s: %v", fullID, err)
@@ -200,7 +224,10 @@ func (s *OrderGRPCServer) CreateOrder(ctx context.Context, req *pb.PizzaOrderReq
 		CustomerId:       req.CustomerId,
 		CreatedAt:       now.UnixNano(),
 		Status:           "pending",
-		TotalPrice:       totalPriceInt32,
+		TotalPrice:       totalPriceInt32, // Цена товаров без доставки
+		DiscountAmount:   discountAmount,
+		DiscountPercent:  discountPercent,
+		FinalPrice:       finalPrice, // Итоговая цена: товары + доставка - скидка
 		Items:            pbItems, // ✅ Добавляем Items!
 		IsSet:            isSet,
 		SetName:          setName,
@@ -256,7 +283,56 @@ func (s *OrderGRPCServer) CreateOrder(ctx context.Context, req *pb.PizzaOrderReq
 			fullID, slotID, slotStartTime.Format("15:04:05"), visibleAt.Format("15:04:05"))
 	}
 
-	// 4. Отправляем бинарный Protobuf в Kafka (асинхронно, не блокируем ответ!)
+	// 4. Сохраняем заказ в PostgreSQL (асинхронно, не блокируем ответ!)
+	if s.orderService != nil {
+		go func() {
+			// Конвертируем pbOrder в models.PizzaOrder для сохранения в БД
+			order := models.PizzaOrder{
+				ID:               pbOrder.Id,
+				DisplayID:        pbOrder.DisplayId,
+				CustomerID:       int(pbOrder.CustomerId),
+				CustomerFirstName: pbOrder.CustomerFirstName,
+				CustomerLastName:  pbOrder.CustomerLastName,
+				CustomerPhone:     pbOrder.CustomerPhone,
+				DeliveryAddress:   pbOrder.DeliveryAddress,
+				PaymentMethod:     "", // Можно добавить в protobuf
+				IsPickup:          pbOrder.IsPickup,
+				PickupLocationID:  pbOrder.PickupLocationId,
+				TotalPrice:        int(pbOrder.TotalPrice),
+				Status:            pbOrder.Status,
+				CreatedAt:         now,
+				TargetSlotID:       pbOrder.TargetSlotId,
+				VisibleAt:         visibleAt,
+			}
+			
+			// Конвертируем pbItems в PizzaItem
+			for _, pbItem := range pbOrder.Items {
+				item := models.PizzaItem{
+					PizzaName:   pbItem.PizzaName,
+					Quantity:    int(pbItem.Quantity),
+					Price:       int(pbItem.Price),
+					Ingredients: pbItem.Ingredients,
+					Extras:      pbItem.Extras,
+				}
+				// Конвертируем ingredient_amounts
+				if pbItem.IngredientAmounts != nil {
+					item.IngredientAmounts = make(map[string]int)
+					for k, v := range pbItem.IngredientAmounts {
+						item.IngredientAmounts[k] = int(v)
+					}
+				}
+				order.Items = append(order.Items, item)
+			}
+			
+			if err := s.orderService.SaveOrder(order); err != nil {
+				log.Printf("⚠️ Ошибка сохранения заказа %s в PostgreSQL: %v", fullID, err)
+			} else {
+				log.Printf("✅ Заказ %s сохранен в PostgreSQL", fullID)
+			}
+		}()
+	}
+
+	// 5. Отправляем бинарный Protobuf в Kafka (асинхронно, не блокируем ответ!)
 	if s.kafkaWriter != nil {
 		go func() {
 			// Используем background context с таймаутом для асинхронной отправки

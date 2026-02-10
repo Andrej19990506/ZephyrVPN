@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,10 +57,15 @@ type Recipe struct {
 	Name           string         `json:"name" gorm:"type:varchar(255);not null"`
 	Description    string         `json:"description" gorm:"type:text"`
 	MenuItemID     *string        `json:"menu_item_id" gorm:"type:uuid;index"` // Связь с позицией меню
+	StationIDs     string         `json:"station_ids" gorm:"type:text"` // JSON массив ID станций, через которые проходит блюдо (обязательно, например: ["station-uuid-1", "station-uuid-2"])
 	PortionSize    float64        `json:"portion_size" gorm:"type:decimal(10,2);default:1"` // Количество порций
 	Unit           string         `json:"unit" gorm:"type:varchar(20);default:'pcs'"` // Единица измерения порции
 	IsSemiFinished bool           `json:"is_semi_finished" gorm:"default:false"` // Флаг полуфабриката
 	IsActive       bool           `json:"is_active" gorm:"default:true"`
+	// Recipe Book fields (Frontend Knowledge Base)
+	InstructionText string        `json:"instruction_text" gorm:"type:text"` // Пошаговая инструкция в Markdown
+	VideoURL        string        `json:"video_url" gorm:"type:text"` // Ссылка на видео в S3
+	PhotoURLs       string        `json:"photo_urls" gorm:"type:jsonb"` // JSONB массив ссылок на фото в S3 (оптимизировано для индексации)
 	CreatedAt      time.Time      `json:"created_at" gorm:"autoCreateTime"`
 	UpdatedAt      time.Time      `json:"updated_at" gorm:"autoUpdateTime"`
 	DeletedAt      gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
@@ -81,6 +87,32 @@ func (r *Recipe) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
+// GetStationIDs возвращает массив ID станций из JSON строки
+func (r *Recipe) GetStationIDs() ([]string, error) {
+	if r.StationIDs == "" {
+		return []string{}, nil
+	}
+	var stationIDs []string
+	if err := json.Unmarshal([]byte(r.StationIDs), &stationIDs); err != nil {
+		return nil, err
+	}
+	return stationIDs, nil
+}
+
+// SetStationIDs устанавливает массив ID станций в JSON строку
+func (r *Recipe) SetStationIDs(stationIDs []string) error {
+	if len(stationIDs) == 0 {
+		r.StationIDs = "[]"
+		return nil
+	}
+	data, err := json.Marshal(stationIDs)
+	if err != nil {
+		return err
+	}
+	r.StationIDs = string(data)
+	return nil
+}
+
 // RecipeIngredient представляет ингредиент в рецепте (BOM)
 type RecipeIngredient struct {
 	ID                string    `json:"id" gorm:"type:uuid;primaryKey"`
@@ -89,8 +121,8 @@ type RecipeIngredient struct {
 	Nomenclature      *NomenclatureItem `gorm:"foreignKey:NomenclatureID" json:"nomenclature,omitempty"`
 	IngredientRecipeID *string  `json:"ingredient_recipe_id" gorm:"type:uuid;index"` // NULL если это сырье, UUID рецепта если это полуфабрикат
 	IngredientRecipe  *Recipe    `gorm:"foreignKey:IngredientRecipeID" json:"ingredient_recipe,omitempty"` // Связь с рецептом-полуфабрикатом
-	Quantity          float64    `json:"quantity" gorm:"type:decimal(10,4);not null"` // Количество на 1 порцию (в граммах)
-	Unit              string     `json:"unit" gorm:"type:varchar(20);not null;default:'g'"` // Всегда граммы
+	Quantity          float64    `json:"quantity" gorm:"type:decimal(10,4);not null"` // Количество на 1 порцию в единицах измерения товара
+	Unit              string     `json:"unit" gorm:"type:varchar(20);not null;default:'g'"` // Единица измерения (берется из номенклатуры: g, kg, pcs, l, ml и т.д.)
 	IsOptional        bool       `json:"is_optional" gorm:"default:false"` // Опциональный ингредиент
 	CreatedAt         time.Time  `json:"created_at" gorm:"autoCreateTime"`
 	UpdatedAt         time.Time  `json:"updated_at" gorm:"autoUpdateTime"`
@@ -105,6 +137,39 @@ func (RecipeIngredient) TableName() string {
 func (ri *RecipeIngredient) BeforeCreate(tx *gorm.DB) error {
 	if ri.ID == "" {
 		ri.ID = uuid.New().String()
+	}
+	return nil
+}
+
+// RecipeNode представляет узел в иерархической структуре папок для рецептов
+type RecipeNode struct {
+	ID          string    `json:"id" gorm:"type:uuid;primaryKey"`
+	Name        string    `json:"name" gorm:"type:varchar(255);not null"`
+	ParentID    *string   `json:"parent_id" gorm:"type:uuid;index"` // NULL для корневого уровня
+	IsFolder    bool      `json:"is_folder" gorm:"default:false;index"` // true для папки, false для рецепта
+	RecipeID    *string   `json:"recipe_id" gorm:"type:uuid;index"` // NULL для папок, UUID рецепта для узлов-рецептов
+	Recipe      *Recipe   `gorm:"foreignKey:RecipeID" json:"recipe,omitempty"` // Связь с рецептом
+	GridCol     *int      `json:"grid_col" gorm:"type:integer;default:0"` // Позиция в сетке (колонка)
+	GridRow     *int      `json:"grid_row" gorm:"type:integer;default:0"` // Позиция в сетке (строка)
+	CreatedAt   time.Time `json:"created_at" gorm:"autoCreateTime"`
+	UpdatedAt   time.Time `json:"updated_at" gorm:"autoUpdateTime"`
+	DeletedAt   gorm.DeletedAt `json:"deleted_at,omitempty" gorm:"index"`
+	
+	// Virtual fields
+	Parent      *RecipeNode   `gorm:"foreignKey:ParentID" json:"parent,omitempty"`
+	Children    []RecipeNode  `gorm:"foreignKey:ParentID" json:"children,omitempty"`
+	ChildrenCount int         `json:"children_count" gorm:"-"` // Количество дочерних элементов
+}
+
+// TableName указывает имя таблицы
+func (RecipeNode) TableName() string {
+	return "recipe_nodes"
+}
+
+// BeforeCreate генерирует UUID
+func (rn *RecipeNode) BeforeCreate(tx *gorm.DB) error {
+	if rn.ID == "" {
+		rn.ID = uuid.New().String()
 	}
 	return nil
 }
