@@ -523,7 +523,7 @@ func (sc *StaffController) PinCodeAuth(c *gin.Context) {
 	// Ищем сотрудника по PIN-коду (используем phone как PIN для простоты)
 	// В будущем можно добавить отдельное поле pin_code в Staff
 	var staff models.Staff
-	if err := sc.db.Preload("User").Where("deleted_at IS NULL AND status = ?", "Active").Joins("JOIN users ON users.id = staff.user_id").Where("users.phone = ?", req.PinCode).First(&staff).Error; err != nil {
+	if err := sc.db.Preload("User").Joins("JOIN users ON users.id = staff.user_id").Where("staff.deleted_at IS NULL AND staff.status = ?", "Active").Where("users.phone = ? AND users.status = ?", req.PinCode, models.UserStatusActive).First(&staff).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"success": false,

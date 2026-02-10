@@ -123,9 +123,7 @@ func (s *CounterpartyService) CheckINNDuplicate(inn string) (bool, error) {
 		return false, err
 	}
 	return true, nil // ИНН найден, есть дубликат
-}
-
-// CreateInvoice создает счет для контрагента
+}// CreateInvoice создает счет для контрагента
 func (s *CounterpartyService) CreateInvoice(invoice *models.Invoice) error {
 	// Проверяем, существует ли контрагент
 	if invoice.CounterpartyID != nil && *invoice.CounterpartyID != "" {
